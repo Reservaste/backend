@@ -204,6 +204,44 @@ export interface PublicAvailabilitySlot {
   capacity: number | null;
 }
 
+// ---------------------------------------------------------------
+// Phase 5: Booking
+// ---------------------------------------------------------------
+
+export type BookingStatus = "CONFIRMED" | "CANCELLED";
+export type BookingCancellationReason = "CUSTOMER_REQUEST" | "SLOT_CANCELLED" | "RULE_DISCONTINUED";
+
+export interface Booking {
+  id: string;
+  organizationId: string;
+  customerId: string;
+  slotOccurrenceId: string;
+  status: BookingStatus;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string | null;
+  cancelledAt: string | null;
+  cancelledBy: string | null;
+  cancellationReason: BookingCancellationReason | null;
+}
+
+/** Reason codes returned by can_customer_book() / book_slot(). Ref: ADR-0005, ADR-0013. */
+export type CanBookReason =
+  | "OK"
+  | "AUTH_REQUIRED"
+  | "NOT_A_CUSTOMER"
+  | "ORGANIZATION_INACTIVE"
+  | "SERVICE_INACTIVE"
+  | "OCCURRENCE_NOT_AVAILABLE"
+  | "NO_ENTITLEMENT"
+  | "SLOT_FULL"
+  | "ALREADY_BOOKED";
+
+export interface BookSlotResult {
+  status: CanBookReason | "DUPLICATE";
+  booking?: Booking;
+}
+
 export type EntitlementType = "TIME" | "CREDITS";
 export type EntitlementCancellationReason = "CUSTOMER_REQUEST" | "ORGANIZATION_REVOKED";
 

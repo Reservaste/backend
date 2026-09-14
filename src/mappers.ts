@@ -3,6 +3,7 @@
 // frontend never hand-rolls this mapping per query.
 
 import type {
+  Booking,
   Customer,
   Organization,
   OrganizationMember,
@@ -372,6 +373,36 @@ export interface PublicAvailabilityRow {
   status: string | null;
   remaining: number | null;
   capacity: number | null;
+}
+
+export interface BookingRow {
+  id: string;
+  organization_id: string;
+  customer_id: string;
+  slot_occurrence_id: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  cancelled_at: string | null;
+  cancelled_by: string | null;
+  cancellation_reason: string | null;
+}
+
+export function mapBooking(row: BookingRow): Booking {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    customerId: row.customer_id,
+    slotOccurrenceId: row.slot_occurrence_id,
+    status: row.status as Booking["status"],
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    createdBy: row.created_by,
+    cancelledAt: row.cancelled_at,
+    cancelledBy: row.cancelled_by,
+    cancellationReason: row.cancellation_reason as Booking["cancellationReason"],
+  };
 }
 
 export function mapPublicAvailabilitySlot(row: PublicAvailabilityRow): PublicAvailabilitySlot {
