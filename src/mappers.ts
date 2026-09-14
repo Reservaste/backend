@@ -7,6 +7,9 @@ import type {
   Organization,
   OrganizationMember,
   Profile,
+  PublicAvailabilitySlot,
+  PublicOrganization,
+  PublicService,
   Resource,
   ScheduleException,
   ScheduleRule,
@@ -335,5 +338,51 @@ export function mapSlotOccurrence(row: SlotOccurrenceRow): SlotOccurrence {
     cancelledAt: row.cancelled_at,
     cancelledBy: row.cancelled_by,
     cancellationReason: row.cancellation_reason as SlotOccurrence["cancellationReason"],
+  };
+}
+
+export interface PublicOrganizationRow {
+  id: string;
+  slug: string;
+  name: string;
+  timezone: string;
+}
+
+export function mapPublicOrganization(row: PublicOrganizationRow): PublicOrganization {
+  return { id: row.id, slug: row.slug, name: row.name, timezone: row.timezone };
+}
+
+export interface PublicServiceRow {
+  id: string;
+  organization_id: string;
+  name: string;
+  description: string | null;
+}
+
+export function mapPublicService(row: PublicServiceRow): PublicService {
+  return { id: row.id, organizationId: row.organization_id, name: row.name, description: row.description };
+}
+
+export interface PublicAvailabilityRow {
+  slot_occurrence_id: string;
+  service_id: string;
+  start_at: string;
+  end_at: string;
+  mode: string;
+  status: string | null;
+  remaining: number | null;
+  capacity: number | null;
+}
+
+export function mapPublicAvailabilitySlot(row: PublicAvailabilityRow): PublicAvailabilitySlot {
+  return {
+    slotOccurrenceId: row.slot_occurrence_id,
+    serviceId: row.service_id,
+    startAt: row.start_at,
+    endAt: row.end_at,
+    mode: row.mode as PublicAvailabilitySlot["mode"],
+    status: row.status as PublicAvailabilitySlot["status"],
+    remaining: row.remaining,
+    capacity: row.capacity,
   };
 }

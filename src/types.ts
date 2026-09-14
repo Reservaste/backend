@@ -168,6 +168,42 @@ export interface SlotOccurrence {
   cancellationReason: SlotOccurrenceCancellationReason | null;
 }
 
+// ---------------------------------------------------------------
+// Phase 4: public calendar shapes (from organizations_public,
+// services_public, get_public_availability -- never the base tables)
+// ---------------------------------------------------------------
+
+export interface PublicOrganization {
+  id: string;
+  slug: string;
+  name: string;
+  timezone: string;
+}
+
+export interface PublicService {
+  id: string;
+  organizationId: string;
+  name: string;
+  description: string | null;
+}
+
+/**
+ * Shape of one row from get_public_availability(). `remaining`/`capacity`
+ * are only ever non-null when `mode === "EXACT"` -- the database itself
+ * enforces this (ADR-0008), not this type. `status` is only set for
+ * LIMITED/BOOLEAN modes.
+ */
+export interface PublicAvailabilitySlot {
+  slotOccurrenceId: string;
+  serviceId: string;
+  startAt: string;
+  endAt: string;
+  mode: PublicAvailabilityDisplay;
+  status: "AVAILABLE" | "LOW" | "FULL" | null;
+  remaining: number | null;
+  capacity: number | null;
+}
+
 export type EntitlementType = "TIME" | "CREDITS";
 export type EntitlementCancellationReason = "CUSTOMER_REQUEST" | "ORGANIZATION_REVOKED";
 
