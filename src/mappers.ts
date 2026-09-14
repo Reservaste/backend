@@ -2,7 +2,7 @@
 // domain types in ./types.ts. Keeping this in the shared package means the
 // frontend never hand-rolls this mapping per query.
 
-import type { Customer, Organization, OrganizationMember, Profile } from "./types.js";
+import type { Customer, Organization, OrganizationMember, Profile } from "./types";
 
 export interface OrganizationRow {
   id: string;

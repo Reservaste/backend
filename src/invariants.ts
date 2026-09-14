@@ -2,7 +2,7 @@
 // the functions both the frontend server actions and any future backend
 // code call so the rule is defined once. Ref: docs/domain.md, docs/security.md.
 
-import type { Customer, OrganizationMember } from "./types.js";
+import type { Customer, OrganizationMember } from "./types";
 
 /** True if the member row grants admin-side access to its organization. */
 export function isActiveMember(member: Pick<OrganizationMember, "isActive">): boolean {
