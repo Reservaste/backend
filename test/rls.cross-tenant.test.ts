@@ -160,4 +160,15 @@ describe("ADR-0006: RLS two-layer cross-tenant isolation", () => {
     });
     expect(error).not.toBeNull();
   });
+
+  it("blocks creating an Organization via a raw insert, bypassing the atomic owner RPC", async () => {
+    // Only create_organization_with_owner() may create an Organization --
+    // a raw insert would produce one with no OWNER membership row, which
+    // is a broken state. There is intentionally no INSERT policy for this.
+    const { error } = await ownerA.client.from("organizations").insert({
+      slug: `orphan-org-${Date.now()}`,
+      name: "Orphan Org",
+    });
+    expect(error).not.toBeNull();
+  });
 });

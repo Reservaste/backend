@@ -266,9 +266,14 @@ create policy organizations_select_members
   on public.organizations for select
   using (public.is_organization_member(id));
 
-create policy organizations_insert_authenticated
-  on public.organizations for insert
-  with check (auth.uid() is not null);
+-- Deliberately no INSERT policy here. create_organization_with_owner() is
+-- SECURITY DEFINER and runs as the table owner, which bypasses RLS
+-- entirely, so it does not need one -- and omitting it means no client can
+-- ever create an Organization via a raw `.from('organizations').insert()`
+-- and skip the atomic owner-membership insert that RPC guarantees. An
+-- Organization with no OWNER is a broken state; this is what stops it at
+-- the database level rather than relying on every future caller to
+-- remember to use the RPC.
 
 create policy organizations_update_owner
   on public.organizations for update
