@@ -63,3 +63,67 @@ export interface Customer {
   cancelledBy: string | null;
   cancellationReason: CustomerCancellationReason | null;
 }
+
+// ---------------------------------------------------------------
+// Phase 2: Service, Resource, ServiceEntitlement
+// ---------------------------------------------------------------
+
+export type ResourceCancellationReason = "DISCONTINUED_BY_ORGANIZATION";
+
+export interface Resource {
+  id: string;
+  organizationId: string;
+  name: string;
+  description: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string | null;
+  cancelledAt: string | null;
+  cancelledBy: string | null;
+  cancellationReason: ResourceCancellationReason | null;
+}
+
+export type ServiceCancellationReason = "DISCONTINUED_BY_ORGANIZATION";
+
+export interface Service {
+  id: string;
+  organizationId: string;
+  name: string;
+  description: string | null;
+  /** ADR-0008: null means "use the Organization's default". */
+  publicAvailabilityDisplayOverride: PublicAvailabilityDisplay | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string | null;
+  cancelledAt: string | null;
+  cancelledBy: string | null;
+  cancellationReason: ServiceCancellationReason | null;
+}
+
+export type EntitlementType = "TIME" | "CREDITS";
+export type EntitlementCancellationReason = "CUSTOMER_REQUEST" | "ORGANIZATION_REVOKED";
+
+export interface ServiceEntitlement {
+  id: string;
+  organizationId: string;
+  customerId: string;
+  serviceId: string;
+  entitlementType: EntitlementType;
+  /** ADR-0013: whether canCustomerBook() (Phase 7) also requires a covering Payment. */
+  requiresActivePayment: boolean;
+  /** Set when entitlementType is "TIME", null otherwise. */
+  validFrom: string | null;
+  validUntil: string | null;
+  /** Set when entitlementType is "CREDITS", null otherwise. */
+  creditsTotal: number | null;
+  creditsRemaining: number | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string | null;
+  cancelledAt: string | null;
+  cancelledBy: string | null;
+  cancellationReason: EntitlementCancellationReason | null;
+}

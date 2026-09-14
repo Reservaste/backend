@@ -47,3 +47,38 @@ export const signInSchema = z.object({
 });
 
 export type SignInInput = z.infer<typeof signInSchema>;
+
+export const createServiceSchema = z.object({
+  name: z.string().min(2, "El nombre debe tener al menos 2 caracteres").max(120),
+  description: z.string().max(2000).optional(),
+});
+
+export type CreateServiceInput = z.infer<typeof createServiceSchema>;
+
+export const createResourceSchema = z.object({
+  name: z.string().min(2, "El nombre debe tener al menos 2 caracteres").max(120),
+  description: z.string().max(2000).optional(),
+});
+
+export type CreateResourceInput = z.infer<typeof createResourceSchema>;
+
+const timeEntitlementSchema = z.object({
+  entitlementType: z.literal("TIME"),
+  validFrom: z.string().date(),
+  validUntil: z.string().date().optional(),
+});
+
+const creditsEntitlementSchema = z.object({
+  entitlementType: z.literal("CREDITS"),
+  creditsTotal: z.coerce.number().int().positive("Los créditos deben ser un número positivo"),
+});
+
+export const createServiceEntitlementSchema = z
+  .object({
+    customerId: z.string().uuid(),
+    serviceId: z.string().uuid(),
+    requiresActivePayment: z.coerce.boolean().default(true),
+  })
+  .and(z.discriminatedUnion("entitlementType", [timeEntitlementSchema, creditsEntitlementSchema]));
+
+export type CreateServiceEntitlementInput = z.infer<typeof createServiceEntitlementSchema>;

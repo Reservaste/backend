@@ -1,52 +1,17 @@
 // Integration test for ADR-0006 (RLS, two layers: tenant + row ownership).
 // Requires a running local Supabase (`npx supabase start` in this repo).
-// The defaults below are the fixed demo credentials `supabase start` prints
-// for a local project -- never valid against a real Supabase project, so
-// hardcoding them here as a local-dev fallback is safe. Override via env
-// vars to point at a different local stack.
 //
 // This is the test the Phase 0 closing summary flagged as a real risk:
 // "RLS de dos capas... necesita tests de cross-tenant explícitos antes de
 // cerrar Phase 1, no solo revisión de código."
 
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-
-const SUPABASE_URL = process.env.SUPABASE_URL ?? "http://127.0.0.1:54321";
-const ANON_KEY =
-  process.env.SUPABASE_ANON_KEY ??
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0";
-const SERVICE_ROLE_KEY =
-  process.env.SUPABASE_SERVICE_ROLE_KEY ??
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU";
-
-const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
-const PASSWORD = "cross-tenant-test-password-123";
-
-async function createSignedInUser(emailPrefix: string) {
-  const email = `${emailPrefix}-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
-  const { data, error } = await admin.auth.admin.createUser({
-    email,
-    password: PASSWORD,
-    email_confirm: true,
-  });
-  if (error || !data.user) {
-    throw new Error(`failed to create test user ${email}: ${error?.message}`);
-  }
-
-  const client = createClient(SUPABASE_URL, ANON_KEY);
-  const { error: signInError } = await client.auth.signInWithPassword({ email, password: PASSWORD });
-  if (signInError) {
-    throw new Error(`failed to sign in test user ${email}: ${signInError.message}`);
-  }
-
-  return { id: data.user.id, client };
-}
+import { admin, createOrganization, createSignedInUser, type SignedInUser } from "./helpers";
 
 describe("ADR-0006: RLS two-layer cross-tenant isolation", () => {
-  let ownerA: { id: string; client: SupabaseClient };
-  let ownerB: { id: string; client: SupabaseClient };
-  let customerA: { id: string; client: SupabaseClient };
+  let ownerA: SignedInUser;
+  let ownerB: SignedInUser;
+  let customerA: SignedInUser;
   let orgA: { id: string; slug: string };
   let orgB: { id: string; slug: string };
   const createdUserIds: string[] = [];
@@ -57,23 +22,8 @@ describe("ADR-0006: RLS two-layer cross-tenant isolation", () => {
     customerA = await createSignedInUser("customer-a");
     createdUserIds.push(ownerA.id, ownerB.id, customerA.id);
 
-    const slugSuffix = Date.now();
-
-    const { data: orgAData, error: orgAError } = await ownerA.client.rpc("create_organization_with_owner", {
-      p_slug: `org-a-${slugSuffix}`,
-      p_name: "Organization A",
-      p_timezone: "America/Montevideo",
-    });
-    if (orgAError || !orgAData) throw new Error(`failed to create Org A: ${orgAError?.message}`);
-    orgA = { id: orgAData.id, slug: orgAData.slug };
-
-    const { data: orgBData, error: orgBError } = await ownerB.client.rpc("create_organization_with_owner", {
-      p_slug: `org-b-${slugSuffix}`,
-      p_name: "Organization B",
-      p_timezone: "America/Montevideo",
-    });
-    if (orgBError || !orgBData) throw new Error(`failed to create Org B: ${orgBError?.message}`);
-    orgB = { id: orgBData.id, slug: orgBData.slug };
+    orgA = await createOrganization(ownerA, "org-a");
+    orgB = await createOrganization(ownerB, "org-b");
 
     // Owner A enrolls customerA as a Customer of Org A.
     const { error: customerInsertError } = await ownerA.client.from("customers").insert({
