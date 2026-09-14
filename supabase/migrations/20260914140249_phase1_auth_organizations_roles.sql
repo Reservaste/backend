@@ -4,6 +4,10 @@
 -- Entities: Profile, Organization, OrganizationMember, Customer.
 -- RLS follows the two-layer model of ADR-0006 (tenant + row ownership).
 -- No ORM: this migration is the single source of truth for the schema.
+--
+-- Table/type creation happens first, in dependency order; RLS policies are
+-- added afterwards in their own section, because organizations' policies
+-- reference organization_members and must not run before that table exists.
 
 -- ============================================================
 -- Generic helpers
@@ -61,16 +65,6 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function public.handle_new_user();
 
-alter table public.profiles enable row level security;
-
-create policy profiles_select_own
-  on public.profiles for select
-  using (id = auth.uid());
-
-create policy profiles_update_own
-  on public.profiles for update
-  using (id = auth.uid());
-
 -- ============================================================
 -- organizations
 -- ============================================================
@@ -100,40 +94,6 @@ create trigger organizations_set_updated_at
   for each row execute function public.set_updated_at();
 
 create unique index organizations_slug_idx on public.organizations (slug);
-
-alter table public.organizations enable row level security;
-
--- Direct table SELECT is restricted to members (admin use). Anonymous public
--- browsing (Phase 4) goes through a dedicated public view/RPC that only
--- surfaces the public shape, never this table's RLS, so private columns
--- (billing, internal config) are never at risk of leaking through a future
--- policy mistake here.
-create policy organizations_select_members
-  on public.organizations for select
-  using (
-    exists (
-      select 1 from public.organization_members om
-      where om.organization_id = organizations.id
-        and om.profile_id = auth.uid()
-        and om.is_active
-    )
-  );
-
-create policy organizations_insert_authenticated
-  on public.organizations for insert
-  with check (auth.uid() is not null);
-
-create policy organizations_update_owner
-  on public.organizations for update
-  using (
-    exists (
-      select 1 from public.organization_members om
-      where om.organization_id = organizations.id
-        and om.profile_id = auth.uid()
-        and om.role = 'OWNER'
-        and om.is_active
-    )
-  );
 
 -- ============================================================
 -- organization_members (roles: OWNER | STAFF)
@@ -167,35 +127,6 @@ create trigger organization_members_set_updated_at
 create index organization_members_organization_idx on public.organization_members (organization_id);
 create index organization_members_profile_idx on public.organization_members (profile_id);
 
-alter table public.organization_members enable row level security;
-
--- ADR-0006, two layers: tenant (same organization) + the row itself grants
--- visibility for STAFF/OWNER. There is no separate "ownership by profile"
--- layer here because membership rows ARE the admin-side identity -- any
--- active member of the org can see the roster.
-create policy organization_members_select_same_org
-  on public.organization_members for select
-  using (
-    exists (
-      select 1 from public.organization_members om
-      where om.organization_id = organization_members.organization_id
-        and om.profile_id = auth.uid()
-        and om.is_active
-    )
-  );
-
-create policy organization_members_write_owner
-  on public.organization_members for all
-  using (
-    exists (
-      select 1 from public.organization_members om
-      where om.organization_id = organization_members.organization_id
-        and om.profile_id = auth.uid()
-        and om.role = 'OWNER'
-        and om.is_active
-    )
-  );
-
 -- ============================================================
 -- customers (a Profile as customer of an Organization)
 -- ============================================================
@@ -226,45 +157,15 @@ create trigger customers_set_updated_at
 create index customers_organization_idx on public.customers (organization_id);
 create index customers_profile_idx on public.customers (profile_id);
 
-alter table public.customers enable row level security;
-
--- ADR-0006, two layers combined with OR:
---  - CUSTOMER: sees only their own row (profile_id = auth.uid()).
---  - OWNER/STAFF: sees every customer row of their organization.
--- This is the exact policy shape ADR-0006 was written to fix -- filtering
--- by organization_id alone would let any customer of an org see every
--- other customer's row in that same org.
-create policy customers_select_self_or_staff
-  on public.customers for select
-  using (
-    profile_id = auth.uid()
-    or exists (
-      select 1 from public.organization_members om
-      where om.organization_id = customers.organization_id
-        and om.profile_id = auth.uid()
-        and om.is_active
-    )
-  );
-
-create policy customers_write_staff
-  on public.customers for all
-  using (
-    exists (
-      select 1 from public.organization_members om
-      where om.organization_id = customers.organization_id
-        and om.profile_id = auth.uid()
-        and om.is_active
-    )
-  );
-
 -- ============================================================
 -- create_organization_with_owner RPC
 -- ============================================================
 -- Creating an Organization and granting its creator OWNER membership must
--- happen atomically: organizations_select_members above means the creator
--- could not even see the organization they just created until the OWNER
--- membership row exists. A plain two-step insert from the client risks a
--- half-created organization with no owner if the second insert fails.
+-- happen atomically: the organizations_select_members policy below means
+-- the creator could not even see the organization they just created until
+-- the OWNER membership row exists. A plain two-step insert from the client
+-- risks a half-created organization with no owner if the second insert
+-- fails.
 
 create or replace function public.create_organization_with_owner(
   p_slug text,
@@ -295,3 +196,108 @@ end;
 $$;
 
 grant execute on function public.create_organization_with_owner(text, text, text) to authenticated;
+
+-- ============================================================
+-- Row Level Security (ADR-0006: tenant + row ownership, two layers)
+-- ============================================================
+--
+-- Membership checks below go through the SECURITY DEFINER helper
+-- functions further down (is_organization_member / is_organization_owner)
+-- instead of an inline `exists (select 1 from organization_members ...)`
+-- subquery. A subquery against organization_members inside a policy that
+-- itself protects organization_members re-triggers that same policy for
+-- the subquery, which Postgres detects as infinite recursion (this broke
+-- the very first attempt at this migration -- caught by the ADR-0006
+-- cross-tenant integration test, not by review). A SECURITY DEFINER
+-- function bypasses RLS for that one narrow, safe check, breaking the
+-- cycle.
+
+create or replace function public.is_organization_member(p_organization_id uuid)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.organization_members om
+    where om.organization_id = p_organization_id
+      and om.profile_id = auth.uid()
+      and om.is_active
+  );
+$$;
+
+create or replace function public.is_organization_owner(p_organization_id uuid)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.organization_members om
+    where om.organization_id = p_organization_id
+      and om.profile_id = auth.uid()
+      and om.role = 'OWNER'
+      and om.is_active
+  );
+$$;
+
+alter table public.profiles enable row level security;
+alter table public.organizations enable row level security;
+alter table public.organization_members enable row level security;
+alter table public.customers enable row level security;
+
+-- profiles: a user can read/update only their own profile row
+create policy profiles_select_own
+  on public.profiles for select
+  using (id = auth.uid());
+
+create policy profiles_update_own
+  on public.profiles for update
+  using (id = auth.uid());
+
+-- organizations: direct table SELECT is restricted to members (admin use).
+-- Anonymous public browsing (Phase 4) goes through a dedicated public
+-- view/RPC that only surfaces the public shape, never this table's RLS, so
+-- private columns (billing, internal config) are never at risk of leaking
+-- through a future policy mistake here.
+create policy organizations_select_members
+  on public.organizations for select
+  using (public.is_organization_member(id));
+
+create policy organizations_insert_authenticated
+  on public.organizations for insert
+  with check (auth.uid() is not null);
+
+create policy organizations_update_owner
+  on public.organizations for update
+  using (public.is_organization_owner(id));
+
+-- organization_members: two layers -- membership of the SAME organization
+-- grants read of the whole roster; only an OWNER of that organization can
+-- write to it.
+create policy organization_members_select_same_org
+  on public.organization_members for select
+  using (public.is_organization_member(organization_id));
+
+create policy organization_members_write_owner
+  on public.organization_members for all
+  using (public.is_organization_owner(organization_id));
+
+-- customers: ADR-0006 two layers combined with OR:
+--  - CUSTOMER: sees only their own row (profile_id = auth.uid()).
+--  - OWNER/STAFF: sees every customer row of their organization.
+-- This is the exact policy shape ADR-0006 was written to fix -- filtering
+-- by organization_id alone would let any customer of an org see every
+-- other customer's row in that same org.
+create policy customers_select_self_or_staff
+  on public.customers for select
+  using (
+    profile_id = auth.uid()
+    or public.is_organization_member(organization_id)
+  );
+
+create policy customers_write_staff
+  on public.customers for all
+  using (public.is_organization_member(organization_id));

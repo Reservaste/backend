@@ -25,11 +25,19 @@ del proyecto para el razonamiento completo.
 Requiere [Supabase CLI](https://supabase.com/docs/guides/cli) y Docker.
 
 ```bash
-npx supabase start      # levanta Postgres/Auth/Studio local
-npx supabase db reset   # aplica las migraciones desde cero
+npx supabase start        # levanta Postgres/Auth/Studio local
+npx supabase db reset     # aplica las migraciones desde cero
 npm install
 npm run typecheck
+npm test                  # unit tests (invariantes/schemas, sin DB)
+npm run test:integration  # RLS cross-tenant contra el Supabase local (ADR-0006)
 ```
+
+`test:integration` necesita `supabase start` corriendo. Usa por defecto
+las credenciales demo fijas que imprime `supabase start` para un proyecto
+local (nunca válidas contra un proyecto real) — se pueden sobreescribir
+con `SUPABASE_URL`/`SUPABASE_ANON_KEY`/`SUPABASE_SERVICE_ROLE_KEY` si tu
+stack local corre en otro puerto.
 
 ## Convenciones
 
