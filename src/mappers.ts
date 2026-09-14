@@ -7,6 +7,7 @@ import type {
   Customer,
   Organization,
   OrganizationMember,
+  Payment,
   Profile,
   PublicAvailabilitySlot,
   PublicOrganization,
@@ -382,6 +383,7 @@ export interface BookingRow {
   customer_id: string;
   slot_occurrence_id: string;
   recurring_booking_id: string | null;
+  service_entitlement_id: string | null;
   status: string;
   created_at: string;
   updated_at: string;
@@ -398,6 +400,7 @@ export function mapBooking(row: BookingRow): Booking {
     customerId: row.customer_id,
     slotOccurrenceId: row.slot_occurrence_id,
     recurringBookingId: row.recurring_booking_id,
+    serviceEntitlementId: row.service_entitlement_id,
     status: row.status as Booking["status"],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -405,6 +408,38 @@ export function mapBooking(row: BookingRow): Booking {
     cancelledAt: row.cancelled_at,
     cancelledBy: row.cancelled_by,
     cancellationReason: row.cancellation_reason as Booking["cancellationReason"],
+  };
+}
+
+export interface PaymentRow {
+  id: string;
+  organization_id: string;
+  customer_id: string;
+  service_entitlement_id: string;
+  period_start: string;
+  period_end: string;
+  status: string;
+  amount: number | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+}
+
+export function mapPayment(row: PaymentRow): Payment {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    customerId: row.customer_id,
+    serviceEntitlementId: row.service_entitlement_id,
+    periodStart: row.period_start,
+    periodEnd: row.period_end,
+    status: row.status as Payment["status"],
+    amount: row.amount,
+    notes: row.notes,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    createdBy: row.created_by,
   };
 }
 
