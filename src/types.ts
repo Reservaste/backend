@@ -102,6 +102,72 @@ export interface Service {
   cancellationReason: ServiceCancellationReason | null;
 }
 
+// ---------------------------------------------------------------
+// Phase 3: ScheduleRule, ScheduleException, SlotOccurrence
+// ---------------------------------------------------------------
+
+export type ScheduleRuleCancellationReason = "DISCONTINUED_BY_ORGANIZATION";
+
+export interface ScheduleRule {
+  id: string;
+  organizationId: string;
+  serviceId: string;
+  resourceId: string;
+  /** 0 = Sunday, matches JS Date#getDay(). */
+  weekday: number;
+  /** Wall-clock local time, e.g. "09:00:00". Ref: ADR-0014. */
+  localStartTime: string;
+  durationMinutes: number;
+  capacity: number;
+  validFrom: string;
+  validUntil: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string | null;
+  cancelledAt: string | null;
+  cancelledBy: string | null;
+  cancellationReason: ScheduleRuleCancellationReason | null;
+}
+
+export type ScheduleExceptionType = "CANCELLED" | "MODIFIED";
+
+export interface ScheduleException {
+  id: string;
+  organizationId: string;
+  scheduleRuleId: string;
+  exceptionDate: string;
+  exceptionType: ScheduleExceptionType;
+  modifiedLocalStartTime: string | null;
+  modifiedDurationMinutes: number | null;
+  modifiedCapacity: number | null;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string | null;
+}
+
+export type SlotOccurrenceStatus = "ACTIVE" | "BLOCKED" | "CANCELLED";
+export type SlotOccurrenceCancellationReason = "SLOT_CANCELLED" | "RULE_DISCONTINUED";
+
+export interface SlotOccurrence {
+  id: string;
+  organizationId: string;
+  scheduleRuleId: string;
+  serviceId: string;
+  resourceId: string;
+  startAt: string;
+  endAt: string;
+  generatedTimezone: string;
+  capacity: number;
+  status: SlotOccurrenceStatus;
+  scheduleExceptionId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  cancelledAt: string | null;
+  cancelledBy: string | null;
+  cancellationReason: SlotOccurrenceCancellationReason | null;
+}
+
 export type EntitlementType = "TIME" | "CREDITS";
 export type EntitlementCancellationReason = "CUSTOMER_REQUEST" | "ORGANIZATION_REVOKED";
 

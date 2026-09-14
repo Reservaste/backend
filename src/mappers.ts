@@ -8,8 +8,11 @@ import type {
   OrganizationMember,
   Profile,
   Resource,
+  ScheduleException,
+  ScheduleRule,
   Service,
   ServiceEntitlement,
+  SlotOccurrence,
 } from "./types";
 
 export interface OrganizationRow {
@@ -220,5 +223,117 @@ export function mapServiceEntitlement(row: ServiceEntitlementRow): ServiceEntitl
     cancelledAt: row.cancelled_at,
     cancelledBy: row.cancelled_by,
     cancellationReason: row.cancellation_reason as ServiceEntitlement["cancellationReason"],
+  };
+}
+
+export interface ScheduleRuleRow {
+  id: string;
+  organization_id: string;
+  service_id: string;
+  resource_id: string;
+  weekday: number;
+  local_start_time: string;
+  duration_minutes: number;
+  capacity: number;
+  valid_from: string;
+  valid_until: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  cancelled_at: string | null;
+  cancelled_by: string | null;
+  cancellation_reason: string | null;
+}
+
+export function mapScheduleRule(row: ScheduleRuleRow): ScheduleRule {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    serviceId: row.service_id,
+    resourceId: row.resource_id,
+    weekday: row.weekday,
+    localStartTime: row.local_start_time,
+    durationMinutes: row.duration_minutes,
+    capacity: row.capacity,
+    validFrom: row.valid_from,
+    validUntil: row.valid_until,
+    isActive: row.is_active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    createdBy: row.created_by,
+    cancelledAt: row.cancelled_at,
+    cancelledBy: row.cancelled_by,
+    cancellationReason: row.cancellation_reason as ScheduleRule["cancellationReason"],
+  };
+}
+
+export interface ScheduleExceptionRow {
+  id: string;
+  organization_id: string;
+  schedule_rule_id: string;
+  exception_date: string;
+  exception_type: string;
+  modified_local_start_time: string | null;
+  modified_duration_minutes: number | null;
+  modified_capacity: number | null;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+}
+
+export function mapScheduleException(row: ScheduleExceptionRow): ScheduleException {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    scheduleRuleId: row.schedule_rule_id,
+    exceptionDate: row.exception_date,
+    exceptionType: row.exception_type as ScheduleException["exceptionType"],
+    modifiedLocalStartTime: row.modified_local_start_time,
+    modifiedDurationMinutes: row.modified_duration_minutes,
+    modifiedCapacity: row.modified_capacity,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    createdBy: row.created_by,
+  };
+}
+
+export interface SlotOccurrenceRow {
+  id: string;
+  organization_id: string;
+  schedule_rule_id: string;
+  service_id: string;
+  resource_id: string;
+  start_at: string;
+  end_at: string;
+  generated_timezone: string;
+  capacity: number;
+  status: string;
+  schedule_exception_id: string | null;
+  created_at: string;
+  updated_at: string;
+  cancelled_at: string | null;
+  cancelled_by: string | null;
+  cancellation_reason: string | null;
+}
+
+export function mapSlotOccurrence(row: SlotOccurrenceRow): SlotOccurrence {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    scheduleRuleId: row.schedule_rule_id,
+    serviceId: row.service_id,
+    resourceId: row.resource_id,
+    startAt: row.start_at,
+    endAt: row.end_at,
+    generatedTimezone: row.generated_timezone,
+    capacity: row.capacity,
+    status: row.status as SlotOccurrence["status"],
+    scheduleExceptionId: row.schedule_exception_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    cancelledAt: row.cancelled_at,
+    cancelledBy: row.cancelled_by,
+    cancellationReason: row.cancellation_reason as SlotOccurrence["cancellationReason"],
   };
 }

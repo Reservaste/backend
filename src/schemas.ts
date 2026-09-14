@@ -82,3 +82,40 @@ export const createServiceEntitlementSchema = z
   .and(z.discriminatedUnion("entitlementType", [timeEntitlementSchema, creditsEntitlementSchema]));
 
 export type CreateServiceEntitlementInput = z.infer<typeof createServiceEntitlementSchema>;
+
+export const createScheduleRuleSchema = z.object({
+  serviceId: z.string().uuid(),
+  resourceId: z.string().uuid(),
+  weekday: z.coerce.number().int().min(0).max(6),
+  localStartTime: z
+    .string()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Formato de hora inválido (HH:MM)"),
+  durationMinutes: z.coerce.number().int().positive(),
+  capacity: z.coerce.number().int().positive(),
+  validFrom: z.string().date().optional(),
+  validUntil: z.string().date().optional(),
+});
+
+export type CreateScheduleRuleInput = z.infer<typeof createScheduleRuleSchema>;
+
+export const createScheduleExceptionSchema = z
+  .object({
+    scheduleRuleId: z.string().uuid(),
+    exceptionDate: z.string().date(),
+  })
+  .and(
+    z.discriminatedUnion("exceptionType", [
+      z.object({ exceptionType: z.literal("CANCELLED") }),
+      z.object({
+        exceptionType: z.literal("MODIFIED"),
+        modifiedLocalStartTime: z
+          .string()
+          .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Formato de hora inválido (HH:MM)")
+          .optional(),
+        modifiedDurationMinutes: z.coerce.number().int().positive().optional(),
+        modifiedCapacity: z.coerce.number().int().positive().optional(),
+      }),
+    ]),
+  );
+
+export type CreateScheduleExceptionInput = z.infer<typeof createScheduleExceptionSchema>;
