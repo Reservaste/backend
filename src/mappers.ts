@@ -11,6 +11,7 @@ import type {
   PublicAvailabilitySlot,
   PublicOrganization,
   PublicService,
+  RecurringBooking,
   Resource,
   ScheduleException,
   ScheduleRule,
@@ -380,6 +381,7 @@ export interface BookingRow {
   organization_id: string;
   customer_id: string;
   slot_occurrence_id: string;
+  recurring_booking_id: string | null;
   status: string;
   created_at: string;
   updated_at: string;
@@ -395,6 +397,7 @@ export function mapBooking(row: BookingRow): Booking {
     organizationId: row.organization_id,
     customerId: row.customer_id,
     slotOccurrenceId: row.slot_occurrence_id,
+    recurringBookingId: row.recurring_booking_id,
     status: row.status as Booking["status"],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -402,6 +405,40 @@ export function mapBooking(row: BookingRow): Booking {
     cancelledAt: row.cancelled_at,
     cancelledBy: row.cancelled_by,
     cancellationReason: row.cancellation_reason as Booking["cancellationReason"],
+  };
+}
+
+export interface RecurringBookingRow {
+  id: string;
+  organization_id: string;
+  customer_id: string;
+  schedule_rule_id: string;
+  status: string;
+  start_date: string;
+  end_date: string | null;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  cancelled_at: string | null;
+  cancelled_by: string | null;
+  cancellation_reason: string | null;
+}
+
+export function mapRecurringBooking(row: RecurringBookingRow): RecurringBooking {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    customerId: row.customer_id,
+    scheduleRuleId: row.schedule_rule_id,
+    status: row.status as RecurringBooking["status"],
+    startDate: row.start_date,
+    endDate: row.end_date,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    createdBy: row.created_by,
+    cancelledAt: row.cancelled_at,
+    cancelledBy: row.cancelled_by,
+    cancellationReason: row.cancellation_reason as RecurringBooking["cancellationReason"],
   };
 }
 
