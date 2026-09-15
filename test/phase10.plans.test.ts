@@ -350,6 +350,48 @@ describe("Phase 10: plans and subscriptions", () => {
       expect(orgs.data).toEqual([]);
     });
 
+    it("nobody can promote themselves to platform admin through the API", async () => {
+      const person = await createSignedInUser("p10-selfpromote");
+      createdUserIds.push(person.id);
+
+      // platform_admins has RLS on with no INSERT policy at all, so this
+      // is denied by the absence of a rule rather than by one that could
+      // be edited wrong later. Granting admin is a deliberate act done
+      // directly against the database.
+      const insert = await person.client
+        .from("platform_admins")
+        .insert({ profile_id: person.id, note: "me promuevo solo" });
+      expect(insert.error).not.toBeNull();
+
+      const stillNotAdmin = await person.client.rpc("is_platform_admin");
+      expect(stillNotAdmin.data).toBe(false);
+
+      // And the table itself is invisible to them, so they can't even
+      // enumerate who the admins are.
+      const peek = await person.client.from("platform_admins").select("profile_id");
+      expect(peek.data).toEqual([]);
+    });
+
+    it("an organization OWNER has no platform powers -- the two roles are unrelated", async () => {
+      const owner = await createSignedInUser("p10-orgowner");
+      createdUserIds.push(owner.id);
+      const org = await createOrganization(owner, "p10-orgowner-org");
+
+      // Being OWNER of your own gym is not being the platform owner.
+      const isAdmin = await owner.client.rpc("is_platform_admin");
+      expect(isAdmin.data).toBe(false);
+
+      const upgradeSelf = await owner.client.rpc("set_organization_subscription", {
+        p_organization_id: org.id,
+        p_plan_code: "full",
+        p_status: "ACTIVE",
+      });
+      expect(upgradeSelf.error?.message).toContain("NOT_AUTHORIZED");
+
+      const invites = await owner.client.rpc("platform_invites");
+      expect(invites.data).toEqual([]);
+    });
+
     it("a platform admin can mint invites and move an organization between plans", async () => {
       const platformOwner = await createSignedInUser("p10-admin");
       createdUserIds.push(platformOwner.id);
