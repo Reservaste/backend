@@ -29,6 +29,8 @@ export interface OrganizationRow {
   public_availability_display: string;
   low_availability_percentage: number;
   low_availability_fixed_cap: number | null;
+  brand_color?: string | null;
+  logo_path?: string | null;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -44,6 +46,8 @@ export function mapOrganization(row: OrganizationRow): Organization {
     publicAvailabilityDisplay: row.public_availability_display as Organization["publicAvailabilityDisplay"],
     lowAvailabilityPercentage: row.low_availability_percentage,
     lowAvailabilityFixedCap: row.low_availability_fixed_cap,
+    brandColor: row.brand_color ?? null,
+    logoPath: row.logo_path ?? null,
     isActive: row.is_active,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -349,10 +353,19 @@ export interface PublicOrganizationRow {
   slug: string;
   name: string;
   timezone: string;
+  brand_color?: string | null;
+  logo_path?: string | null;
 }
 
 export function mapPublicOrganization(row: PublicOrganizationRow): PublicOrganization {
-  return { id: row.id, slug: row.slug, name: row.name, timezone: row.timezone };
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    timezone: row.timezone,
+    brandColor: row.brand_color ?? null,
+    logoPath: row.logo_path ?? null,
+  };
 }
 
 export interface PublicServiceRow {

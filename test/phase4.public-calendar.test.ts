@@ -97,8 +97,13 @@ describe("Phase 4: public calendar", () => {
     expect(error).toBeNull();
     expect(data?.name).toBeTruthy();
     // Only the safe columns exist on this view at all -- not a filtering
-    // question, there is no billing/internal-config column to leak.
-    expect(Object.keys(data ?? {}).sort()).toEqual(["id", "name", "slug", "timezone"]);
+    // question, there is no billing/internal-config column to leak. Any
+    // addition here has to be a deliberate edit to this list: brand_color
+    // and logo_path were added in Phase 13 because branding renders for
+    // visitors with no session (ADR-0020).
+    expect(Object.keys(data ?? {}).sort()).toEqual(
+      ["brand_color", "id", "logo_path", "name", "slug", "timezone"].sort(),
+    );
   });
 
   it("lets an anonymous client list the organization's public services", async () => {

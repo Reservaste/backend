@@ -18,6 +18,10 @@ export interface Organization {
   publicAvailabilityDisplay: PublicAvailabilityDisplay;
   lowAvailabilityPercentage: number;
   lowAvailabilityFixedCap: number | null;
+  /** Accent colour as #rrggbb, or null for the product default. Ref: ADR-0020. */
+  brandColor: string | null;
+  /** Object path inside the organization-logos bucket. Ref: ADR-0020. */
+  logoPath: string | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -178,6 +182,9 @@ export interface PublicOrganization {
   slug: string;
   name: string;
   timezone: string;
+  /** Ref: ADR-0020. Branding is public -- it renders for visitors with no session. */
+  brandColor: string | null;
+  logoPath: string | null;
 }
 
 export interface PublicService {
