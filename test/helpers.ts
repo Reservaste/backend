@@ -41,12 +41,37 @@ export async function createSignedInUser(emailPrefix: string): Promise<SignedInU
   return { id: data.user.id, client };
 }
 
-export async function createOrganization(owner: SignedInUser, slugPrefix: string) {
+/**
+ * Creating an organization is invite-gated (Phase 10). Tests mint their
+ * own invite through the service-role client -- which is what the
+ * platform owner's console does with an authenticated admin -- and
+ * default to the unlimited plan so plan limits only apply where a test
+ * asks for them.
+ */
+export async function createInvite(planCode = "full", overrides: Record<string, unknown> = {}) {
+  const code = `T${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+  const { error } = await admin
+    .from("organization_invites")
+    .insert({ code, plan_code: planCode, ...overrides });
+  if (error) {
+    throw new Error(`failed to create invite: ${error.message}`);
+  }
+  return code;
+}
+
+export async function createOrganization(
+  owner: SignedInUser,
+  slugPrefix: string,
+  planCode = "full",
+) {
   const slug = `${slugPrefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const inviteCode = await createInvite(planCode);
+
   const { data, error } = await owner.client.rpc("create_organization_with_owner", {
     p_slug: slug,
     p_name: slug,
     p_timezone: "America/Montevideo",
+    p_invite_code: inviteCode,
   });
   if (error || !data) {
     throw new Error(`failed to create organization ${slug}: ${error?.message}`);
