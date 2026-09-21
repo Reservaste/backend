@@ -250,8 +250,10 @@ export interface Payment {
   id: string;
   organizationId: string;
   customerId: string;
-  /** ADR-0013: a payment covers an entitlement, not a service. */
-  serviceEntitlementId: string;
+  /** ADR-0022: a payment covers a service for a customer. */
+  serviceId: string;
+  /** @deprecated ADR-0022. Historical provenance only; null on new payments. */
+  serviceEntitlementId: string | null;
   periodStart: string;
   periodEnd: string;
   status: PaymentStatus;
