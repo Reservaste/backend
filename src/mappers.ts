@@ -506,6 +506,8 @@ export function mapPublicAvailabilitySlot(row: PublicAvailabilityRow): PublicAva
   return {
     slotOccurrenceId: row.slot_occurrence_id,
     serviceId: row.service_id,
+    serviceName: row.service_name ?? "",
+    serviceColor: row.service_color ?? null,
     startAt: row.start_at,
     endAt: row.end_at,
     mode: row.mode as PublicAvailabilitySlot["mode"],

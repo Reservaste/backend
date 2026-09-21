@@ -215,6 +215,9 @@ export interface PublicService {
 export interface PublicAvailabilitySlot {
   slotOccurrenceId: string;
   serviceId: string;
+  /** Ref: ADR-0023. The public calendar shows several services at once. */
+  serviceName: string;
+  serviceColor: string | null;
   startAt: string;
   endAt: string;
   mode: PublicAvailabilityDisplay;
