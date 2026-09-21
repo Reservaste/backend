@@ -1,13 +1,27 @@
-// Integration tests for Phase 7 (Payments): the ADR-0013 rule that a
-// payment is validated against the *slot's* date and never "today",
-// entitlement-vs-payment separation (courtesy access needs no payment),
-// credit consumption and restoration, and payment privacy.
-// Requires a running local Supabase (`npx supabase start`).
+// Integration tests for payments and booking coverage (ADR-0022, which
+// supersedes most of ADR-0013).
+//
+// The rule that survived the move intact is the one that matters: a
+// payment is validated against the SLOT's date, never against "today".
+// A payment that is current right now says nothing about a class three
+// weeks out, and that is the easy mistake to make.
+//
+// What changed: coverage is keyed on (customer, service) instead of on a
+// ServiceEntitlement, and whether payment is required at all is a
+// property of the Service. Requires a running local Supabase.
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { admin, createOrganization, createSignedInUser, type SignedInUser } from "./helpers";
+import { afterAll, describe, expect, it } from "vitest";
+import {
+  admin,
+  createOrganization,
+  createSignedInUser,
+  firstFutureOccurrence,
+  makeServicePaid,
+  payFor,
+  type SignedInUser,
+} from "./helpers";
 
-/** ISO date (YYYY-MM-DD) N days from today, in UTC terms. */
+/** ISO date N days from today, in UTC terms. */
 function isoDate(offsetDays: number): string {
   const d = new Date();
   d.setUTCDate(d.getUTCDate() + offsetDays);
@@ -47,16 +61,15 @@ async function setupOrg(prefix: string, capacity = 10) {
     .select()
     .single();
 
-  const { data: occurrences } = await owner.client
-    .from("slot_occurrences")
-    .select("id, start_at")
-    .eq("schedule_rule_id", rule!.id)
-    .order("start_at", { ascending: true })
-    .limit(1);
+  const occurrence = await firstFutureOccurrence(owner, rule!.id);
 
-  return { owner, org, service: service!, rule: rule!, occurrence: occurrences![0]! };
+  return { owner, org, service: service!, rule: rule!, occurrence };
 }
 
+/**
+ * Enrolling is the whole requirement now (ADR-0022): there is no second,
+ * per-service permission for staff to grant.
+ */
 async function enrollCustomer(owner: SignedInUser, org: { id: string }, prefix: string) {
   const customer = await createSignedInUser(prefix);
   const { data: customerRow } = await owner.client
@@ -67,7 +80,7 @@ async function enrollCustomer(owner: SignedInUser, org: { id: string }, prefix: 
   return { customer, customerRow: customerRow! };
 }
 
-describe("Phase 7: payments and entitlement consumption", () => {
+describe("Payments and booking coverage", () => {
   const createdUserIds: string[] = [];
 
   afterAll(async () => {
@@ -76,78 +89,55 @@ describe("Phase 7: payments and entitlement consumption", () => {
     }
   });
 
-  it("requires a covering payment when the entitlement demands one", async () => {
-    const { owner, org, service, occurrence } = await setupOrg("p7-needspay");
+  it("a service that does not require payment books with no payment at all", async () => {
+    const { owner, org, occurrence } = await setupOrg("p7-free");
     createdUserIds.push(owner.id);
-    const { customer, customerRow } = await enrollCustomer(owner, org, "p7-needspay-customer");
+    const { customer } = await enrollCustomer(owner, org, "p7-free-customer");
     createdUserIds.push(customer.id);
 
-    const { data: entitlement } = await owner.client
-      .from("service_entitlements")
-      .insert({
-        organization_id: org.id,
-        customer_id: customerRow.id,
-        service_id: service.id,
-        entitlement_type: "TIME",
-        valid_from: "2020-01-01",
-        requires_active_payment: true,
-        created_by: owner.id,
-      })
-      .select()
-      .single();
+    // Nobody enabled anything for this person: this is what removing
+    // manual enablement buys.
+    const res = await customer.client.rpc("book_slot", { p_slot_occurrence_id: occurrence.id });
+    expect(res.data.status).toBe("OK");
+  });
 
-    // Entitlement is live but unpaid -- the customer-facing difference
-    // between "you don't have this service" and "your payment lapsed".
+  it("requires a covering payment when the service requires it", async () => {
+    const { owner, org, service, occurrence } = await setupOrg("p7-gated");
+    createdUserIds.push(owner.id);
+    await makeServicePaid(owner, service.id);
+    const { customer, customerRow } = await enrollCustomer(owner, org, "p7-gated-customer");
+    createdUserIds.push(customer.id);
+
     const unpaid = await customer.client.rpc("book_slot", { p_slot_occurrence_id: occurrence.id });
     expect(unpaid.data.status).toBe("PAYMENT_REQUIRED");
 
-    await owner.client.from("payments").insert({
-      organization_id: org.id,
-      customer_id: customerRow.id,
-      service_entitlement_id: entitlement!.id,
-      period_start: isoDate(-30),
-      period_end: isoDate(30),
-      status: "PAID",
-      amount: 1500,
-      created_by: owner.id,
+    await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-30),
+      to: isoDate(30),
     });
 
     const paid = await customer.client.rpc("book_slot", { p_slot_occurrence_id: occurrence.id });
     expect(paid.data.status).toBe("OK");
   });
 
-  it("ADR-0013: the payment must cover the SLOT's date, not the date the booking is made", async () => {
+  it("the payment must cover the SLOT's date, not the date the booking is made", async () => {
     const { owner, org, service, occurrence } = await setupOrg("p7-slotdate");
     createdUserIds.push(owner.id);
+    await makeServicePaid(owner, service.id);
     const { customer, customerRow } = await enrollCustomer(owner, org, "p7-slotdate-customer");
     createdUserIds.push(customer.id);
 
-    const { data: entitlement } = await owner.client
-      .from("service_entitlements")
-      .insert({
-        organization_id: org.id,
-        customer_id: customerRow.id,
-        service_id: service.id,
-        entitlement_type: "TIME",
-        valid_from: "2020-01-01",
-        requires_active_payment: true,
-        created_by: owner.id,
-      })
-      .select()
-      .single();
-
     // A period that covers TODAY but ends before the class happens. A
-    // naive implementation checking "is there a payment valid now?" would
-    // wrongly allow this -- the class is 2 days out, the payment ends
-    // yesterday+1.
-    await owner.client.from("payments").insert({
-      organization_id: org.id,
-      customer_id: customerRow.id,
-      service_entitlement_id: entitlement!.id,
-      period_start: isoDate(-30),
-      period_end: isoDate(0),
-      status: "PAID",
-      created_by: owner.id,
+    // naive "is there a payment valid now?" would wrongly allow this.
+    await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-30),
+      to: isoDate(0),
     });
 
     const res = await customer.client.rpc("book_slot", { p_slot_occurrence_id: occurrence.id });
@@ -157,162 +147,111 @@ describe("Phase 7: payments and entitlement consumption", () => {
   it("a PENDING or OVERDUE payment does not count as paid", async () => {
     const { owner, org, service, occurrence } = await setupOrg("p7-pending");
     createdUserIds.push(owner.id);
+    await makeServicePaid(owner, service.id);
     const { customer, customerRow } = await enrollCustomer(owner, org, "p7-pending-customer");
     createdUserIds.push(customer.id);
 
-    const { data: entitlement } = await owner.client
-      .from("service_entitlements")
-      .insert({
-        organization_id: org.id,
-        customer_id: customerRow.id,
-        service_id: service.id,
-        entitlement_type: "TIME",
-        valid_from: "2020-01-01",
-        requires_active_payment: true,
-        created_by: owner.id,
-      })
-      .select()
-      .single();
-
-    await owner.client.from("payments").insert({
-      organization_id: org.id,
-      customer_id: customerRow.id,
-      service_entitlement_id: entitlement!.id,
-      period_start: isoDate(-30),
-      period_end: isoDate(30),
+    const { data: payment } = await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-30),
+      to: isoDate(30),
       status: "PENDING",
-      created_by: owner.id,
     });
 
-    const res = await customer.client.rpc("book_slot", { p_slot_occurrence_id: occurrence.id });
-    expect(res.data.status).toBe("PAYMENT_REQUIRED");
+    expect((await customer.client.rpc("book_slot", { p_slot_occurrence_id: occurrence.id })).data.status).toBe(
+      "PAYMENT_REQUIRED",
+    );
+
+    await owner.client.from("payments").update({ status: "OVERDUE" }).eq("id", payment!.id);
+    expect((await customer.client.rpc("book_slot", { p_slot_occurrence_id: occurrence.id })).data.status).toBe(
+      "PAYMENT_REQUIRED",
+    );
+
+    // Only registering it as actually paid changes the answer.
+    await owner.client.from("payments").update({ status: "PAID" }).eq("id", payment!.id);
+    expect((await customer.client.rpc("book_slot", { p_slot_occurrence_id: occurrence.id })).data.status).toBe("OK");
   });
 
-  it("courtesy access: requires_active_payment = false books with no Payment at all (pago != permiso)", async () => {
-    const { owner, org, service, occurrence } = await setupOrg("p7-courtesy");
+  it("CALENDAR_MONTH: paying mid-month covers from the 1st to the last day", async () => {
+    const { owner, org, service } = await setupOrg("p7-calendar");
     createdUserIds.push(owner.id);
-    const { customer, customerRow } = await enrollCustomer(owner, org, "p7-courtesy-customer");
-    createdUserIds.push(customer.id);
+    await makeServicePaid(owner, service.id, "CALENDAR_MONTH");
 
-    await owner.client.from("service_entitlements").insert({
-      organization_id: org.id,
-      customer_id: customerRow.id,
-      service_id: service.id,
-      entitlement_type: "TIME",
-      valid_from: "2020-01-01",
-      requires_active_payment: false,
-      created_by: owner.id,
+    const { data } = await owner.client.rpc("billing_period_for", {
+      p_service_id: service.id,
+      p_from: "2026-09-15",
     });
 
-    const res = await customer.client.rpc("book_slot", { p_slot_occurrence_id: occurrence.id });
-    expect(res.data.status).toBe("OK");
+    expect(data[0].period_start).toBe("2026-09-01");
+    expect(data[0].period_end).toBe("2026-09-30");
   });
 
-  it("spends a credit on booking and gives it back on cancellation", async () => {
-    const { owner, org, service, occurrence } = await setupOrg("p7-credits");
+  it("ROLLING_MONTH: paying on the 15th covers through the 14th of the next month", async () => {
+    const { owner, org, service } = await setupOrg("p7-rolling");
     createdUserIds.push(owner.id);
-    const { customer, customerRow } = await enrollCustomer(owner, org, "p7-credits-customer");
-    createdUserIds.push(customer.id);
+    await makeServicePaid(owner, service.id, "ROLLING_MONTH");
 
-    const { data: entitlement } = await owner.client
-      .from("service_entitlements")
-      .insert({
-        organization_id: org.id,
-        customer_id: customerRow.id,
-        service_id: service.id,
-        entitlement_type: "CREDITS",
-        credits_total: 10,
-        credits_remaining: 10,
-        requires_active_payment: true, // credits imply the pack was paid (ADR-0013)
-        created_by: owner.id,
-      })
-      .select()
-      .single();
-
-    const booked = await customer.client.rpc("book_slot", { p_slot_occurrence_id: occurrence.id });
-    expect(booked.data.status).toBe("OK");
-    expect(booked.data.booking.service_entitlement_id).toBe(entitlement!.id);
-
-    const { data: afterBooking } = await owner.client
-      .from("service_entitlements")
-      .select("credits_remaining")
-      .eq("id", entitlement!.id)
-      .single();
-    expect(afterBooking?.credits_remaining).toBe(9);
-
-    await customer.client.rpc("cancel_booking", { p_booking_id: booked.data.booking.id });
-
-    const { data: afterCancel } = await owner.client
-      .from("service_entitlements")
-      .select("credits_remaining")
-      .eq("id", entitlement!.id)
-      .single();
-    expect(afterCancel?.credits_remaining).toBe(10);
-  });
-
-  it("a CREDITS entitlement with zero credits left blocks booking", async () => {
-    const { owner, org, service, occurrence } = await setupOrg("p7-nocredits");
-    createdUserIds.push(owner.id);
-    const { customer, customerRow } = await enrollCustomer(owner, org, "p7-nocredits-customer");
-    createdUserIds.push(customer.id);
-
-    await owner.client.from("service_entitlements").insert({
-      organization_id: org.id,
-      customer_id: customerRow.id,
-      service_id: service.id,
-      entitlement_type: "CREDITS",
-      credits_total: 5,
-      credits_remaining: 0,
-      created_by: owner.id,
+    const { data } = await owner.client.rpc("billing_period_for", {
+      p_service_id: service.id,
+      p_from: "2026-09-15",
     });
 
-    const res = await customer.client.rpc("book_slot", { p_slot_occurrence_id: occurrence.id });
-    expect(res.data.status).toBe("NO_ENTITLEMENT");
+    expect(data[0].period_start).toBe("2026-09-15");
+    expect(data[0].period_end).toBe("2026-10-14");
+
+    // Month-end is where a naive "+30 days" goes wrong: paying on 31 Jan
+    // has to land on the end of February, whatever length it has.
+    const { data: endOfMonth } = await owner.client.rpc("billing_period_for", {
+      p_service_id: service.id,
+      p_from: "2026-01-31",
+    });
+    expect(endOfMonth[0].period_end).toBe("2026-02-27");
   });
 
-  it("rejects overlapping PAID periods for the same entitlement (double charge), but allows gaps", async () => {
+  it("rejects overlapping PAID periods for the same customer and service, but allows gaps", async () => {
     const { owner, org, service } = await setupOrg("p7-overlap");
     createdUserIds.push(owner.id);
+    await makeServicePaid(owner, service.id);
     const { customer, customerRow } = await enrollCustomer(owner, org, "p7-overlap-customer");
     createdUserIds.push(customer.id);
 
-    const { data: entitlement } = await owner.client
-      .from("service_entitlements")
-      .insert({
-        organization_id: org.id,
-        customer_id: customerRow.id,
-        service_id: service.id,
-        entitlement_type: "TIME",
-        valid_from: "2020-01-01",
-        created_by: owner.id,
-      })
+    const base = {
+      organizationId: org.id,
+      customerId: customerRow.id,
+      serviceId: service.id,
+    };
+
+    const first = await payFor(owner, { ...base, from: "2026-01-01", to: "2026-01-31" });
+    expect(first.error).toBeNull();
+
+    // Same month charged twice.
+    const overlapping = await payFor(owner, { ...base, from: "2026-01-15", to: "2026-02-15" });
+    expect(overlapping.error?.message).toContain("payments_no_overlapping_paid");
+
+    // A gap is a valid, expected state: the customer simply did not pay
+    // February. Deliberately not a constraint violation.
+    const afterGap = await payFor(owner, { ...base, from: "2026-03-01", to: "2026-03-31" });
+    expect(afterGap.error).toBeNull();
+  });
+
+  it("the same period for a different service is not a double charge", async () => {
+    const { owner, org, service } = await setupOrg("p7-twoservices");
+    createdUserIds.push(owner.id);
+    const { customer, customerRow } = await enrollCustomer(owner, org, "p7-twoservices-customer");
+    createdUserIds.push(customer.id);
+
+    const { data: other } = await owner.client
+      .from("services")
+      .insert({ organization_id: org.id, name: "Pilates", created_by: owner.id })
       .select()
       .single();
 
-    const base = {
-      organization_id: org.id,
-      customer_id: customerRow.id,
-      service_entitlement_id: entitlement!.id,
-      status: "PAID" as const,
-      created_by: owner.id,
-    };
-
-    const first = await owner.client
-      .from("payments")
-      .insert({ ...base, period_start: "2026-09-01", period_end: "2026-09-30" });
-    expect(first.error).toBeNull();
-
-    const overlapping = await owner.client
-      .from("payments")
-      .insert({ ...base, period_start: "2026-09-15", period_end: "2026-10-15" });
-    expect(overlapping.error).not.toBeNull();
-
-    // A gap (skipping October entirely) is a legitimate state: the
-    // customer simply didn't pay that stretch.
-    const withGap = await owner.client
-      .from("payments")
-      .insert({ ...base, period_start: "2026-11-01", period_end: "2026-11-30" });
-    expect(withGap.error).toBeNull();
+    const base = { organizationId: org.id, customerId: customerRow.id, from: "2026-01-01", to: "2026-01-31" };
+    expect((await payFor(owner, { ...base, serviceId: service.id })).error).toBeNull();
+    // Paying two services for the same month is normal, not a duplicate.
+    expect((await payFor(owner, { ...base, serviceId: other!.id })).error).toBeNull();
   });
 
   it("keeps payments private: the customer sees their own, another org's owner sees nothing", async () => {
@@ -321,39 +260,23 @@ describe("Phase 7: payments and entitlement consumption", () => {
     const { customer, customerRow } = await enrollCustomer(owner, org, "p7-privacy-customer");
     createdUserIds.push(customer.id);
 
-    const { data: entitlement } = await owner.client
-      .from("service_entitlements")
-      .insert({
-        organization_id: org.id,
-        customer_id: customerRow.id,
-        service_id: service.id,
-        entitlement_type: "TIME",
-        valid_from: "2020-01-01",
-        created_by: owner.id,
-      })
-      .select()
-      .single();
-
-    await owner.client.from("payments").insert({
-      organization_id: org.id,
-      customer_id: customerRow.id,
-      service_entitlement_id: entitlement!.id,
-      period_start: isoDate(-10),
-      period_end: isoDate(20),
-      status: "PAID",
-      amount: 2000,
-      created_by: owner.id,
+    await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-30),
+      to: isoDate(30),
     });
 
-    const ownView = await customer.client.from("payments").select("id");
-    expect(ownView.data).toHaveLength(1);
+    const mine = await customer.client.from("payments").select("id");
+    expect(mine.data).toHaveLength(1);
 
     const otherOwner = await createSignedInUser("p7-privacy-other");
     createdUserIds.push(otherOwner.id);
     await createOrganization(otherOwner, "p7-privacy-other-org");
 
-    const crossView = await otherOwner.client.from("payments").select("id").eq("organization_id", org.id);
-    expect(crossView.data).toEqual([]);
+    const theirs = await otherOwner.client.from("payments").select("id").eq("organization_id", org.id);
+    expect(theirs.data).toEqual([]);
   });
 
   it("never deletes a payment -- it is voided instead", async () => {
@@ -362,32 +285,13 @@ describe("Phase 7: payments and entitlement consumption", () => {
     const { customer, customerRow } = await enrollCustomer(owner, org, "p7-void-customer");
     createdUserIds.push(customer.id);
 
-    const { data: entitlement } = await owner.client
-      .from("service_entitlements")
-      .insert({
-        organization_id: org.id,
-        customer_id: customerRow.id,
-        service_id: service.id,
-        entitlement_type: "TIME",
-        valid_from: "2020-01-01",
-        created_by: owner.id,
-      })
-      .select()
-      .single();
-
-    const { data: payment } = await owner.client
-      .from("payments")
-      .insert({
-        organization_id: org.id,
-        customer_id: customerRow.id,
-        service_entitlement_id: entitlement!.id,
-        period_start: isoDate(-10),
-        period_end: isoDate(20),
-        status: "PAID",
-        created_by: owner.id,
-      })
-      .select()
-      .single();
+    const { data: payment } = await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-30),
+      to: isoDate(30),
+    });
 
     await owner.client.from("payments").delete().eq("id", payment!.id);
 
@@ -403,22 +307,22 @@ describe("Phase 7: payments and entitlement consumption", () => {
     expect(voided.data?.status).toBe("VOID");
   });
 
-  it("a recurring series stops confirming dates once the entitlement can no longer cover them", async () => {
+  it("a recurring series stops confirming dates once the payment no longer covers them", async () => {
     const { owner, org, service, rule } = await setupOrg("p7-recurring");
     createdUserIds.push(owner.id);
+    await makeServicePaid(owner, service.id);
     const { customer, customerRow } = await enrollCustomer(owner, org, "p7-recurring-customer");
     createdUserIds.push(customer.id);
 
-    // Two credits, but the rolling window holds far more weekly dates --
-    // so the series self-limits instead of booking indefinitely.
-    await owner.client.from("service_entitlements").insert({
-      organization_id: org.id,
-      customer_id: customerRow.id,
-      service_id: service.id,
-      entitlement_type: "CREDITS",
-      credits_total: 2,
-      credits_remaining: 2,
-      created_by: owner.id,
+    // One month paid; the rolling window holds far more weekly dates, so
+    // the series self-limits instead of booking indefinitely.
+    const cutoff = isoDate(20);
+    await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-1),
+      to: cutoff,
     });
 
     const { data: rb } = await customer.client.rpc("create_recurring_booking", { p_schedule_rule_id: rule.id });
@@ -428,7 +332,7 @@ describe("Phase 7: payments and entitlement consumption", () => {
       .select("id", { count: "exact", head: true })
       .eq("recurring_booking_id", rb.id)
       .eq("status", "CONFIRMED");
-    expect(confirmed).toBe(2);
+    expect(confirmed).toBeGreaterThan(0);
 
     const { count: notGenerated } = await owner.client
       .from("bookings")

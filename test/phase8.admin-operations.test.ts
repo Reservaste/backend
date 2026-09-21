@@ -4,7 +4,15 @@
 // Requires a running local Supabase (`npx supabase start`).
 
 import { afterAll, describe, expect, it } from "vitest";
-import { admin, createOrganization, createSignedInUser, type SignedInUser } from "./helpers";
+import {
+  admin,
+  createOrganization,
+  createSignedInUser,
+  isoDate,
+  makeServicePaid,
+  payFor,
+  type SignedInUser,
+} from "./helpers";
 
 async function setupOrg(prefix: string, capacity = 10) {
   const owner = await createSignedInUser(prefix);
@@ -56,15 +64,9 @@ async function enrollWithEntitlement(owner: SignedInUser, org: { id: string }, s
     .select()
     .single();
 
-  await owner.client.from("service_entitlements").insert({
-    organization_id: org.id,
-    customer_id: customerRow!.id,
-    service_id: serviceId,
-    entitlement_type: "TIME",
-    valid_from: "2020-01-01",
-    requires_active_payment: false,
-    created_by: owner.id,
-  });
+  // ADR-0022: no per-service permission to grant any more. Callers that
+  // need the service to be payment-gated register a payment instead.
+  void serviceId;
 
   return { customer, customerRow: customerRow! };
 }
@@ -194,7 +196,11 @@ describe("Phase 8: admin operations", () => {
     const { owner, org, service, occurrence } = await setupOrg("p8-adminbook");
     createdUserIds.push(owner.id);
 
-    // No entitlement yet -- staff sees the same reason a customer would.
+    // The service is payment-gated, so staff sees the same reason a
+    // customer would: not "you have no permission", but "the month is not
+    // paid" (ADR-0022).
+    await makeServicePaid(owner, service.id);
+
     const bare = await createSignedInUser("p8-adminbook-bare");
     createdUserIds.push(bare.id);
     const { data: bareCustomer } = await owner.client
@@ -207,10 +213,17 @@ describe("Phase 8: admin operations", () => {
       p_slot_occurrence_id: occurrence.id,
       p_customer_id: bareCustomer!.id,
     });
-    expect(refused.data.status).toBe("NO_ENTITLEMENT");
+    expect(refused.data.status).toBe("PAYMENT_REQUIRED");
 
     const { customer, customerRow } = await enrollWithEntitlement(owner, org, service.id, "p8-adminbook-ok");
     createdUserIds.push(customer.id);
+    await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-1),
+      to: isoDate(60),
+    });
 
     const booked = await owner.client.rpc("admin_book_for_customer", {
       p_slot_occurrence_id: occurrence.id,

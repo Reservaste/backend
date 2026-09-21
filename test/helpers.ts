@@ -78,3 +78,81 @@ export async function createOrganization(
   }
   return data as { id: string; slug: string };
 }
+
+/**
+ * Makes a service payment-gated (ADR-0022). Replaces what a
+ * ServiceEntitlement with requires_active_payment used to express, except
+ * it now belongs to the service rather than to each customer.
+ */
+export async function makeServicePaid(
+  owner: SignedInUser,
+  serviceId: string,
+  cycle: "CALENDAR_MONTH" | "ROLLING_MONTH" = "CALENDAR_MONTH",
+  price = 2000,
+) {
+  const { error } = await owner.client
+    .from("services")
+    .update({
+      billing_type: "MONTHLY",
+      billing_cycle: cycle,
+      price,
+      payment_required: true,
+    })
+    .eq("id", serviceId);
+  if (error) throw new Error(`failed to make service paid: ${error.message}`);
+}
+
+/** Days from today as an ISO date, for readable payment periods in tests. */
+export function isoDate(offsetDays: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Registers a payment covering [from, to] for a customer on a service. */
+export async function payFor(
+  owner: SignedInUser,
+  args: {
+    organizationId: string;
+    customerId: string;
+    serviceId: string;
+    from: string;
+    to: string;
+    status?: "PAID" | "PENDING" | "OVERDUE" | "VOID";
+    amount?: number;
+  },
+) {
+  const { data, error } = await owner.client
+    .from("payments")
+    .insert({
+      organization_id: args.organizationId,
+      customer_id: args.customerId,
+      service_id: args.serviceId,
+      period_start: args.from,
+      period_end: args.to,
+      status: args.status ?? "PAID",
+      amount: args.amount ?? 2000,
+      created_by: owner.id,
+    })
+    .select()
+    .single();
+  return { data, error };
+}
+
+/**
+ * The first occurrence a booking RPC will actually accept: future ones.
+ * Taking the earliest outright picks today's class when the rule's
+ * weekday is today and its hour has passed, which made several tests
+ * fail only on the right day of the week.
+ */
+export async function firstFutureOccurrence(owner: SignedInUser, scheduleRuleId: string) {
+  const { data } = await owner.client
+    .from("slot_occurrences")
+    .select("id, start_at")
+    .eq("schedule_rule_id", scheduleRuleId)
+    .gte("start_at", new Date().toISOString())
+    .order("start_at", { ascending: true })
+    .limit(1);
+  if (!data || data.length === 0) throw new Error("no future occurrence for rule");
+  return data[0]! as { id: string; start_at: string };
+}

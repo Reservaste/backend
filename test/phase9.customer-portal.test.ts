@@ -1,12 +1,22 @@
 // Integration tests for Phase 9 (customer portal): a customer can see
-// their own bookings/entitlements/payments with enough context to be
+// their own bookings/services/payments with enough context to be
 // legible, and nothing belonging to anyone else -- including other
 // customers of the same organization, which is the case ADR-0006 exists
 // for. Requires a running local Supabase (`npx supabase start`).
 
 import { createClient } from "@supabase/supabase-js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { admin, ANON_KEY, createOrganization, createSignedInUser, SUPABASE_URL, type SignedInUser } from "./helpers";
+import {
+  admin,
+  ANON_KEY,
+  createOrganization,
+  createSignedInUser,
+  firstFutureOccurrence,
+  makeServicePaid,
+  payFor,
+  SUPABASE_URL,
+  type SignedInUser,
+} from "./helpers";
 
 describe("Phase 9: customer portal", () => {
   const createdUserIds: string[] = [];
@@ -16,7 +26,7 @@ describe("Phase 9: customer portal", () => {
   let occurrenceId: string;
   let customerA: SignedInUser;
   let customerB: SignedInUser;
-  let entitlementA: { id: string };
+  let paymentA: { id: string };
 
   beforeAll(async () => {
     owner = await createSignedInUser("p9-owner");
@@ -52,15 +62,12 @@ describe("Phase 9: customer portal", () => {
       .select()
       .single();
 
-    const { data: occurrences } = await owner.client
-      .from("slot_occurrences")
-      .select("id")
-      .eq("schedule_rule_id", rule!.id)
-      .order("start_at", { ascending: true })
-      .limit(1);
-    occurrenceId = occurrences![0]!.id;
+    occurrenceId = (await firstFutureOccurrence(owner, rule!.id)).id;
 
-    // Customer A: enrolled, entitled, paid, booked.
+    // The service is payment-gated (ADR-0022): that is the only gate left.
+    await makeServicePaid(owner, service.id);
+
+    // Customer A: enrolled, paid, booked.
     customerA = await createSignedInUser("p9-customer-a");
     createdUserIds.push(customerA.id);
     const { data: customerARow } = await owner.client
@@ -69,35 +76,19 @@ describe("Phase 9: customer portal", () => {
       .select()
       .single();
 
-    const { data: ent } = await owner.client
-      .from("service_entitlements")
-      .insert({
-        organization_id: org.id,
-        customer_id: customerARow!.id,
-        service_id: service.id,
-        entitlement_type: "TIME",
-        valid_from: "2020-01-01",
-        requires_active_payment: true,
-        created_by: owner.id,
-      })
-      .select()
-      .single();
-    entitlementA = ent!;
-
-    await owner.client.from("payments").insert({
-      organization_id: org.id,
-      customer_id: customerARow!.id,
-      service_entitlement_id: entitlementA.id,
-      period_start: "2020-01-01",
-      period_end: "2030-12-31",
-      status: "PAID",
+    const { data: payA } = await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerARow!.id,
+      serviceId: service.id,
+      from: "2020-01-01",
+      to: "2030-12-31",
       amount: 1500,
-      created_by: owner.id,
     });
+    paymentA = payA!;
 
     await customerA.client.rpc("book_slot", { p_slot_occurrence_id: occurrenceId });
 
-    // Customer B: same organization, own entitlement and booking.
+    // Customer B: same organization, own payment and booking.
     customerB = await createSignedInUser("p9-customer-b");
     createdUserIds.push(customerB.id);
     const { data: customerBRow } = await owner.client
@@ -106,14 +97,13 @@ describe("Phase 9: customer portal", () => {
       .select()
       .single();
 
-    await owner.client.from("service_entitlements").insert({
-      organization_id: org.id,
-      customer_id: customerBRow!.id,
-      service_id: service.id,
-      entitlement_type: "CREDITS",
-      credits_total: 5,
-      credits_remaining: 5,
-      created_by: owner.id,
+    await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerBRow!.id,
+      serviceId: service.id,
+      from: "2020-01-01",
+      to: "2030-12-31",
+      amount: 900,
     });
 
     await customerB.client.rpc("book_slot", { p_slot_occurrence_id: occurrenceId });
@@ -147,22 +137,24 @@ describe("Phase 9: customer portal", () => {
     expect(a.data[0].booking_id).not.toBe(b.data[0].booking_id);
   });
 
-  it("my_entitlements reports whether a payment covers today, not just that the entitlement is active", async () => {
-    const { data, error } = await customerA.client.rpc("my_entitlements");
+  it("my_services reports whether the month is covered, not whether someone enabled it", async () => {
+    const { data, error } = await customerA.client.rpc("my_services");
     expect(error).toBeNull();
     expect(data).toHaveLength(1);
     expect(data[0].service_name).toBe("CrossFit");
-    expect(data[0].requires_active_payment).toBe(true);
-    expect(data[0].paid_today).toBe(true);
+    expect(data[0].payment_required).toBe(true);
+    expect(data[0].is_covered_today).toBe(true);
 
-    // Voiding the only covering payment flips paid_today without touching
-    // the entitlement itself -- the distinction the portal has to show.
-    const { data: payments } = await owner.client.from("payments").select("id").eq("service_entitlement_id", entitlementA.id);
-    await owner.client.from("payments").update({ status: "VOID" }).eq("id", payments![0]!.id);
+    // Voiding the only covering payment flips coverage without the
+    // customer losing access to the service as a concept -- the
+    // distinction the portal has to show (ADR-0022).
+    await owner.client.from("payments").update({ status: "VOID" }).eq("id", paymentA.id);
 
-    const after = await customerA.client.rpc("my_entitlements");
-    expect(after.data[0].is_active).toBe(true);
-    expect(after.data[0].paid_today).toBe(false);
+    const after = await customerA.client.rpc("my_services");
+    expect(after.data[0].payment_required).toBe(true);
+    expect(after.data[0].is_covered_today).toBe(false);
+
+    await owner.client.from("payments").update({ status: "PAID" }).eq("id", paymentA.id);
   });
 
   it("my_payments shows the customer's own payments and nobody else's", async () => {
@@ -171,7 +163,10 @@ describe("Phase 9: customer portal", () => {
     expect(mine.data[0].service_name).toBe("CrossFit");
 
     const theirs = await customerB.client.rpc("my_payments");
-    expect(theirs.data).toEqual([]);
+    expect(theirs.data).toHaveLength(1);
+    expect(Number(theirs.data[0].amount)).toBe(900);
+    // Neither sees the other's.
+    expect(theirs.data[0].payment_id).not.toBe(mine.data[0].payment_id);
   });
 
   it("public_slot_detail works anonymously and respects the disclosure mode", async () => {
@@ -215,12 +210,12 @@ describe("Phase 9: customer portal", () => {
     createdUserIds.push(stranger.id);
 
     const bookings = await stranger.client.rpc("my_bookings");
-    const entitlements = await stranger.client.rpc("my_entitlements");
+    const services = await stranger.client.rpc("my_services");
     const payments = await stranger.client.rpc("my_payments");
 
     expect(bookings.error).toBeNull();
     expect(bookings.data).toEqual([]);
-    expect(entitlements.data).toEqual([]);
+    expect(services.data).toEqual([]);
     expect(payments.data).toEqual([]);
   });
 

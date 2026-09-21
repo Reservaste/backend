@@ -6,7 +6,15 @@
 // local Supabase (`npx supabase start`).
 
 import { afterAll, describe, expect, it } from "vitest";
-import { admin, createOrganization, createSignedInUser, type SignedInUser } from "./helpers";
+import {
+  admin,
+  createOrganization,
+  createSignedInUser,
+  firstFutureOccurrence,
+  makeServicePaid,
+  payFor,
+  type SignedInUser,
+} from "./helpers";
 
 function isoDate(offsetDays: number) {
   const d = new Date();
@@ -49,14 +57,20 @@ async function setupPilates(prefix: string, capacity: number) {
   return { owner, org, service: service!, rule: rule! };
 }
 
+/**
+ * ADR-0022: being an active Customer is the whole requirement. `gated`
+ * makes the service payment-required (which is where the old
+ * requires_active_payment lives now), and `paid` registers a payment
+ * covering the window the rolling generation reaches.
+ */
 async function enrollCustomer(
   owner: SignedInUser,
   org: { id: string },
   serviceId: string,
   prefix: string,
-  options: { entitlement?: boolean; requiresPayment?: boolean } = {},
+  options: { gated?: boolean; paid?: boolean } = {},
 ) {
-  const { entitlement = true, requiresPayment = false } = options;
+  const { gated = false, paid = false } = options;
   const customer = await createSignedInUser(prefix);
 
   const { data: customerRow } = await owner.client
@@ -65,25 +79,21 @@ async function enrollCustomer(
     .select()
     .single();
 
-  let entitlementRow: { id: string } | null = null;
-  if (entitlement) {
-    const { data } = await owner.client
-      .from("service_entitlements")
-      .insert({
-        organization_id: org.id,
-        customer_id: customerRow!.id,
-        service_id: serviceId,
-        entitlement_type: "TIME",
-        valid_from: "2020-01-01",
-        requires_active_payment: requiresPayment,
-        created_by: owner.id,
-      })
-      .select()
-      .single();
-    entitlementRow = data;
+  if (gated) {
+    await makeServicePaid(owner, serviceId);
   }
 
-  return { customer, customerRow: customerRow!, entitlement: entitlementRow };
+  if (paid) {
+    await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerRow!.id,
+      serviceId,
+      from: isoDate(-1),
+      to: isoDate(200),
+    });
+  }
+
+  return { customer, customerRow: customerRow! };
 }
 
 describe("Phase 11: standing reservations", () => {
@@ -129,10 +139,13 @@ describe("Phase 11: standing reservations", () => {
   it("preview on someone's behalf reports the same reasons and books nothing", async () => {
     const { owner, org, service, rule } = await setupPilates("p11-preview", 10);
     createdUserIds.push(owner.id);
-    const withEnt = await enrollCustomer(owner, org, service.id, "p11-preview-ok");
-    const withoutEnt = await enrollCustomer(owner, org, service.id, "p11-preview-noent", {
-      entitlement: false,
+    // The gate is a property of the service, so it applies to both; what
+    // separates them is whether the month is paid.
+    const withEnt = await enrollCustomer(owner, org, service.id, "p11-preview-ok", {
+      gated: true,
+      paid: true,
     });
+    const withoutEnt = await enrollCustomer(owner, org, service.id, "p11-preview-noent");
     createdUserIds.push(withEnt.customer.id, withoutEnt.customer.id);
 
     const ok = await owner.client.rpc("admin_preview_recurring_booking", {
@@ -149,7 +162,7 @@ describe("Phase 11: standing reservations", () => {
       p_customer_id: withoutEnt.customerRow.id,
       p_count: 4,
     });
-    expect(blocked.data.every((r: { can_book: string }) => r.can_book === "NO_ENTITLEMENT")).toBe(true);
+    expect(blocked.data.every((r: { can_book: string }) => r.can_book === "PAYMENT_REQUIRED")).toBe(true);
 
     const { count } = await owner.client
       .from("bookings")
@@ -162,7 +175,7 @@ describe("Phase 11: standing reservations", () => {
     const { owner, org, service, rule } = await setupPilates("p11-unpaid", 10);
     createdUserIds.push(owner.id);
     const { customer, customerRow } = await enrollCustomer(owner, org, service.id, "p11-unpaid-customer", {
-      requiresPayment: true,
+      gated: true,
     });
     createdUserIds.push(customer.id);
 
@@ -183,7 +196,7 @@ describe("Phase 11: standing reservations", () => {
     // The reason has to say "unpaid", not "full" -- the customer can act
     // on one of those and not the other.
     expect(
-      bookings!.every((b: { not_generated_reason: string }) => b.not_generated_reason === "NO_ENTITLEMENT"),
+      bookings!.every((b: { not_generated_reason: string }) => b.not_generated_reason === "PAYMENT_REQUIRED"),
     ).toBe(true);
 
     const { data: rows } = await owner.client.rpc("schedule_rule_standing_reservations", {
@@ -199,7 +212,7 @@ describe("Phase 11: standing reservations", () => {
     const { data: mine } = await customer.client.rpc("my_bookings");
     const pending = mine.filter((b: { status: string }) => b.status === "NOT_GENERATED");
     expect(pending.length).toBeGreaterThan(0);
-    expect(pending[0].not_generated_reason).toBe("NO_ENTITLEMENT");
+    expect(pending[0].not_generated_reason).toBe("PAYMENT_REQUIRED");
   });
 
   it("a full class is recorded as SLOT_FULL, not as an unpaid month", async () => {
@@ -214,14 +227,7 @@ describe("Phase 11: standing reservations", () => {
     // outright picks today's class when the rule's weekday is today and
     // its hour has passed, and the series then legitimately skips it --
     // a latent bug in this test that only fails on the right weekday.
-    const { data: occurrences } = await owner.client
-      .from("slot_occurrences")
-      .select("id")
-      .eq("schedule_rule_id", rule.id)
-      .gte("start_at", new Date().toISOString())
-      .order("start_at", { ascending: true })
-      .limit(1);
-    const occurrenceId = occurrences![0]!.id;
+    const occurrenceId = (await firstFutureOccurrence(owner, rule.id)).id;
 
     const filled = await holder.customer.client.rpc("book_slot", { p_slot_occurrence_id: occurrenceId });
     expect(filled.data.status).toBe("OK");
@@ -250,25 +256,15 @@ describe("Phase 11: standing reservations", () => {
   it("paying the month makes the following dates confirm again", async () => {
     const { owner, org, service, rule } = await setupPilates("p11-paid", 10);
     createdUserIds.push(owner.id);
-    const { customer, customerRow, entitlement } = await enrollCustomer(
+    // Gated and paid: the payment is what makes the dates confirm.
+    const { customer, customerRow } = await enrollCustomer(
       owner,
       org,
       service.id,
       "p11-paid-customer",
-      { requiresPayment: true },
+      { gated: true, paid: true },
     );
     createdUserIds.push(customer.id);
-
-    await owner.client.from("payments").insert({
-      organization_id: org.id,
-      customer_id: customerRow.id,
-      service_entitlement_id: entitlement!.id,
-      period_start: isoDate(-1),
-      period_end: isoDate(120),
-      status: "PAID",
-      amount: 2000,
-      created_by: owner.id,
-    });
 
     const { data: rb } = await owner.client.rpc("admin_create_recurring_booking", {
       p_schedule_rule_id: rule.id,
@@ -378,13 +374,7 @@ describe("Phase 11: standing reservations", () => {
     const { customer } = await enrollCustomer(owner, org, service.id, "p11-regression-customer");
     createdUserIds.push(customer.id);
 
-    const { data: occurrences } = await owner.client
-      .from("slot_occurrences")
-      .select("id")
-      .eq("schedule_rule_id", rule.id)
-      .order("start_at", { ascending: true })
-      .limit(1);
-    const occurrenceId = occurrences![0]!.id;
+    const occurrenceId = (await firstFutureOccurrence(owner, rule.id)).id;
 
     const asCustomer = await customer.client.rpc("can_customer_book", { p_slot_occurrence_id: occurrenceId });
     expect(asCustomer.data).toBe("OK");

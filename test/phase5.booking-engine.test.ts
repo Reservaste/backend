@@ -5,7 +5,15 @@
 // Supabase (`npx supabase start`).
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { admin, createOrganization, createSignedInUser, type SignedInUser } from "./helpers";
+import {
+  admin,
+  createOrganization,
+  createSignedInUser,
+  firstFutureOccurrence,
+  isoDate,
+  makeServicePaid,
+  type SignedInUser,
+} from "./helpers";
 
 async function setupOrgWithService(ownerPrefix: string, capacity: number) {
   const owner = await createSignedInUser(ownerPrefix);
@@ -39,34 +47,21 @@ async function setupOrgWithService(ownerPrefix: string, capacity: number) {
     .select()
     .single();
 
-  const { data: occurrences } = await owner.client
-    .from("slot_occurrences")
-    .select("id")
-    .eq("schedule_rule_id", rule!.id)
-    .order("start_at", { ascending: true })
-    .limit(1);
-  const occurrenceId = occurrences![0]!.id;
+  const occurrenceId = (await firstFutureOccurrence(owner, rule!.id)).id;
 
   return { owner, org, service: service!, occurrenceId };
 }
 
+// ADR-0022: being an active Customer of the organization is the whole
+// requirement now. There is no second, per-service permission to grant.
 async function enrollCustomerWithEntitlement(owner: SignedInUser, org: { id: string }, serviceId: string, prefix: string) {
+  void serviceId;
   const customer = await createSignedInUser(prefix);
   const { data: customerRow } = await owner.client
     .from("customers")
     .insert({ organization_id: org.id, profile_id: customer.id, created_by: owner.id })
     .select()
     .single();
-
-  await owner.client.from("service_entitlements").insert({
-    organization_id: org.id,
-    customer_id: customerRow!.id,
-    service_id: serviceId,
-    entitlement_type: "TIME",
-    valid_from: "2020-01-01",
-    requires_active_payment: false,
-    created_by: owner.id,
-  });
 
   return { customer, customerRow: customerRow! };
 }
@@ -80,19 +75,73 @@ describe("Phase 5: booking engine", () => {
     }
   });
 
-  it("rejects booking when the customer has no ServiceEntitlement", async () => {
-    const { owner, org, service, occurrenceId } = await setupOrgWithService("p5-noent", 10);
+  it("rejects booking a paid service when no payment covers the slot's date", async () => {
+    const { owner, org, service, occurrenceId } = await setupOrgWithService("p5-unpaid", 10);
+    createdUserIds.push(owner.id);
+    await makeServicePaid(owner, service.id);
+
+    const customer = await createSignedInUser("p5-unpaid-customer");
+    createdUserIds.push(customer.id);
+    await owner.client.from("customers").insert({ organization_id: org.id, profile_id: customer.id, created_by: owner.id });
+
+    // Being a customer is no longer the question (ADR-0022); the month is.
+    const { data } = await customer.client.rpc("book_slot", { p_slot_occurrence_id: occurrenceId });
+    expect(data.status).toBe("PAYMENT_REQUIRED");
+  });
+
+  it("lets any active customer book a service that does not require payment", async () => {
+    const { owner, org, occurrenceId } = await setupOrgWithService("p5-free", 10);
     createdUserIds.push(owner.id);
 
-    const customer = await createSignedInUser("p5-noent-customer");
+    // The point of removing manual enablement: nobody had to switch
+    // anything on for this person.
+    const customer = await createSignedInUser("p5-free-customer");
     createdUserIds.push(customer.id);
     await owner.client.from("customers").insert({ organization_id: org.id, profile_id: customer.id, created_by: owner.id });
 
     const { data } = await customer.client.rpc("book_slot", { p_slot_occurrence_id: occurrenceId });
-    expect(data.status).toBe("NO_ENTITLEMENT");
+    expect(data.status).toBe("OK");
+  });
 
-    // Silence unused-var lint for service (kept for readability of setup).
-    void service;
+  it("refuses to book a class that already ended", async () => {
+    const { owner, org } = await setupOrgWithService("p5-past", 10);
+    createdUserIds.push(owner.id);
+
+    const customer = await createSignedInUser("p5-past-customer");
+    createdUserIds.push(customer.id);
+    const { data: customerRow } = await owner.client
+      .from("customers")
+      .insert({ organization_id: org.id, profile_id: customer.id, created_by: owner.id })
+      .select()
+      .single();
+    void customerRow;
+
+    const { data: services } = await owner.client.from("services").select("id").eq("organization_id", org.id).limit(1);
+    const { data: resources } = await owner.client.from("resources").select("id").eq("organization_id", org.id).limit(1);
+    const past = new Date();
+    past.setDate(past.getDate() - 7);
+    const { data: rules } = await owner.client.from("schedule_rules").select("id").eq("organization_id", org.id).limit(1);
+
+    const { data: pastOccurrence } = await admin
+      .from("slot_occurrences")
+      .insert({
+        organization_id: org.id,
+        service_id: services![0]!.id,
+        resource_id: resources![0]!.id,
+        schedule_rule_id: rules![0]!.id,
+        start_at: past.toISOString(),
+        end_at: new Date(past.getTime() + 3600_000).toISOString(),
+        generated_timezone: "America/Montevideo",
+        capacity: 10,
+      })
+      .select()
+      .single();
+
+    // Booking a class that already happened is not a reservation, it is
+    // backdated attendance.
+    const { data } = await customer.client.rpc("book_slot", { p_slot_occurrence_id: pastOccurrence!.id });
+    expect(data.status).toBe("OCCURRENCE_NOT_AVAILABLE");
+    void isoDate;
   });
 
   it("books successfully with a valid entitlement, then rejects a duplicate booking of the same slot", async () => {

@@ -1,11 +1,20 @@
-// Integration tests for Phase 12: a date that could not be confirmed is
-// pending, not decided. Registering the payment has to unblock the
-// upcoming dates of a standing reservation by itself -- before this, the
-// front desk had to delete and recreate the series. Requires a running
-// local Supabase (`npx supabase start`).
+// Integration tests for ADR-0019, re-anchored by ADR-0022: a date that
+// could not be confirmed is pending, not decided.
+//
+// The trigger used to be entitlement changes. With entitlements gone, the
+// writes that can widen what a customer may book are registering a
+// payment and switching payment_required off on the service. Requires a
+// running local Supabase.
 
 import { afterAll, describe, expect, it } from "vitest";
-import { admin, createOrganization, createSignedInUser, type SignedInUser } from "./helpers";
+import {
+  admin,
+  createOrganization,
+  createSignedInUser,
+  makeServicePaid,
+  payFor,
+  type SignedInUser,
+} from "./helpers";
 
 function isoDate(offsetDays: number) {
   const d = new Date();
@@ -47,45 +56,21 @@ async function setupPilates(prefix: string, capacity = 10) {
   return { owner, org, service: service!, rule: rule! };
 }
 
-async function enrollCustomer(
-  owner: SignedInUser,
-  org: { id: string },
-  serviceId: string,
-  prefix: string,
-  entitlement: Record<string, unknown>,
-) {
+async function enrollCustomer(owner: SignedInUser, org: { id: string }, prefix: string) {
   const customer = await createSignedInUser(prefix);
-
   const { data: customerRow } = await owner.client
     .from("customers")
     .insert({ organization_id: org.id, profile_id: customer.id, created_by: owner.id })
     .select()
     .single();
-
-  const { data: entitlementRow } = await owner.client
-    .from("service_entitlements")
-    .insert({
-      organization_id: org.id,
-      customer_id: customerRow!.id,
-      service_id: serviceId,
-      created_by: owner.id,
-      // The column defaults to true; these tests are explicit about which
-      // entitlements are payment-gated, because that is what they measure.
-      requires_active_payment: false,
-      ...entitlement,
-    })
-    .select()
-    .single();
-
-  return { customer, customerRow: customerRow!, entitlement: entitlementRow! };
+  return { customer, customerRow: customerRow! };
 }
 
 async function bookingsOf(owner: SignedInUser, recurringBookingId: string) {
   const { data } = await owner.client
     .from("bookings")
     .select("id, status, not_generated_reason, slot_occurrence_id, slot_occurrences(start_at)")
-    .eq("recurring_booking_id", recurringBookingId)
-    .order("slot_occurrence_id", { ascending: true });
+    .eq("recurring_booking_id", recurringBookingId);
   return data as Array<{
     id: string;
     status: string;
@@ -95,7 +80,7 @@ async function bookingsOf(owner: SignedInUser, recurringBookingId: string) {
   }>;
 }
 
-describe("Phase 12: pending dates reconcile when the payment lands", () => {
+describe("Pending dates reconcile when the payment lands", () => {
   const createdUserIds: string[] = [];
 
   afterAll(async () => {
@@ -107,13 +92,8 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
   it("registering the payment confirms the upcoming dates on its own", async () => {
     const { owner, org, service, rule } = await setupPilates("p12-pay");
     createdUserIds.push(owner.id);
-    const { customer, customerRow, entitlement } = await enrollCustomer(
-      owner,
-      org,
-      service.id,
-      "p12-pay-customer",
-      { entitlement_type: "TIME", valid_from: "2020-01-01", requires_active_payment: true },
-    );
+    await makeServicePaid(owner, service.id);
+    const { customer, customerRow } = await enrollCustomer(owner, org, "p12-pay-customer");
     createdUserIds.push(customer.id);
 
     const { data: rb } = await owner.client.rpc("admin_create_recurring_booking", {
@@ -124,18 +104,18 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
     const before = await bookingsOf(owner, rb.id);
     expect(before.length).toBeGreaterThan(0);
     expect(before.every((b) => b.status === "NOT_GENERATED")).toBe(true);
+    expect(before.every((b) => b.not_generated_reason === "PAYMENT_REQUIRED")).toBe(true);
 
-    await owner.client.from("payments").insert({
-      organization_id: org.id,
-      customer_id: customerRow.id,
-      service_entitlement_id: entitlement.id,
-      period_start: isoDate(-1),
-      period_end: isoDate(200),
-      status: "PAID",
-      amount: 2000,
-      created_by: owner.id,
+    await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-1),
+      to: isoDate(200),
     });
 
+    // Before this existed, the only way out was deleting the series and
+    // recreating it.
     const after = await bookingsOf(owner, rb.id);
     expect(after.every((b) => b.status === "CONFIRMED")).toBe(true);
     expect(after.every((b) => b.not_generated_reason === null)).toBe(true);
@@ -144,13 +124,8 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
   it("only the dates the payment actually covers get confirmed", async () => {
     const { owner, org, service, rule } = await setupPilates("p12-partial");
     createdUserIds.push(owner.id);
-    const { customer, customerRow, entitlement } = await enrollCustomer(
-      owner,
-      org,
-      service.id,
-      "p12-partial-customer",
-      { entitlement_type: "TIME", valid_from: "2020-01-01", requires_active_payment: true },
-    );
+    await makeServicePaid(owner, service.id);
+    const { customer, customerRow } = await enrollCustomer(owner, org, "p12-partial-customer");
     createdUserIds.push(customer.id);
 
     const { data: rb } = await owner.client.rpc("admin_create_recurring_booking", {
@@ -158,17 +133,15 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
       p_customer_id: customerRow.id,
     });
 
-    // One month paid, the rolling window holds ~3. ADR-0013: each date is
-    // validated against the class's own date, not against today.
+    // One month paid, the rolling window holds about three: each date is
+    // validated against its own date, not against today.
     const cutoff = isoDate(30);
-    await owner.client.from("payments").insert({
-      organization_id: org.id,
-      customer_id: customerRow.id,
-      service_entitlement_id: entitlement.id,
-      period_start: isoDate(-1),
-      period_end: cutoff,
-      status: "PAID",
-      created_by: owner.id,
+    await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-1),
+      to: cutoff,
     });
 
     const after = await bookingsOf(owner, rb.id);
@@ -182,20 +155,15 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
     }
     for (const b of pending) {
       expect(b.slot_occurrences.start_at.slice(0, 10) > cutoff).toBe(true);
-      expect(b.not_generated_reason).toBe("NO_ENTITLEMENT");
+      expect(b.not_generated_reason).toBe("PAYMENT_REQUIRED");
     }
   });
 
-  it("a credit top-up confirms the next dates in order, not an arbitrary set", async () => {
-    const { owner, org, service, rule } = await setupPilates("p12-credits");
+  it("extending the paid period confirms the dates that were beyond it", async () => {
+    const { owner, org, service, rule } = await setupPilates("p12-extend");
     createdUserIds.push(owner.id);
-    const { customer, customerRow, entitlement } = await enrollCustomer(
-      owner,
-      org,
-      service.id,
-      "p12-credits-customer",
-      { entitlement_type: "CREDITS", credits_total: 10, credits_remaining: 0 },
-    );
+    await makeServicePaid(owner, service.id);
+    const { customer, customerRow } = await enrollCustomer(owner, org, "p12-extend-customer");
     createdUserIds.push(customer.id);
 
     const { data: rb } = await owner.client.rpc("admin_create_recurring_booking", {
@@ -203,46 +171,28 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
       p_customer_id: customerRow.id,
     });
 
-    const before = await bookingsOf(owner, rb.id);
-    expect(before.every((b) => b.status === "NOT_GENERATED")).toBe(true);
-    expect(before.length).toBeGreaterThan(2);
+    const { data: payment } = await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-1),
+      to: isoDate(10),
+    });
+    const partial = (await bookingsOf(owner, rb.id)).filter((b) => b.status === "NOT_GENERATED").length;
+    expect(partial).toBeGreaterThan(0);
 
-    await owner.client
-      .from("service_entitlements")
-      .update({ credits_remaining: 2 })
-      .eq("id", entitlement.id);
+    // Paying the next month is an UPDATE on the same row here; the rule
+    // is the same either way.
+    await owner.client.from("payments").update({ period_end: isoDate(200) }).eq("id", payment!.id);
 
-    const after = await bookingsOf(owner, rb.id);
-    const confirmed = after
-      .filter((b) => b.status === "CONFIRMED")
-      .sort((a, b) => a.slot_occurrences.start_at.localeCompare(b.slot_occurrences.start_at));
-    expect(confirmed).toHaveLength(2);
-
-    // The two earliest dates, and the credits are spent exactly once each.
-    const earliest = after
-      .map((b) => b.slot_occurrences.start_at)
-      .sort()
-      .slice(0, 2);
-    expect(confirmed.map((b) => b.slot_occurrences.start_at)).toEqual(earliest);
-
-    const { data: entAfter } = await owner.client
-      .from("service_entitlements")
-      .select("credits_remaining")
-      .eq("id", entitlement.id)
-      .single();
-    expect(entAfter?.credits_remaining).toBe(0);
+    expect((await bookingsOf(owner, rb.id)).every((b) => b.status === "CONFIRMED")).toBe(true);
   });
 
-  it("reactivating a suspended entitlement brings the series back", async () => {
-    const { owner, org, service, rule } = await setupPilates("p12-reactivate");
+  it("making the service free unblocks everyone waiting on payment", async () => {
+    const { owner, org, service, rule } = await setupPilates("p12-free");
     createdUserIds.push(owner.id);
-    const { customer, customerRow, entitlement } = await enrollCustomer(
-      owner,
-      org,
-      service.id,
-      "p12-reactivate-customer",
-      { entitlement_type: "TIME", valid_from: "2020-01-01", is_active: false },
-    );
+    await makeServicePaid(owner, service.id);
+    const { customer, customerRow } = await enrollCustomer(owner, org, "p12-free-customer");
     createdUserIds.push(customer.id);
 
     const { data: rb } = await owner.client.rpc("admin_create_recurring_booking", {
@@ -251,7 +201,10 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
     });
     expect((await bookingsOf(owner, rb.id)).every((b) => b.status === "NOT_GENERATED")).toBe(true);
 
-    await owner.client.from("service_entitlements").update({ is_active: true }).eq("id", entitlement.id);
+    // Widening access has to reconcile; narrowing it must never
+    // retroactively cancel anything, which is why only this direction
+    // fires the trigger.
+    await owner.client.from("services").update({ payment_required: false }).eq("id", service.id);
 
     expect((await bookingsOf(owner, rb.id)).every((b) => b.status === "CONFIRMED")).toBe(true);
   });
@@ -259,15 +212,9 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
   it("a date that filled up while unpaid stays pending, with the reason updated", async () => {
     const { owner, org, service, rule } = await setupPilates("p12-filled", 1);
     createdUserIds.push(owner.id);
-    const standing = await enrollCustomer(owner, org, service.id, "p12-filled-standing", {
-      entitlement_type: "TIME",
-      valid_from: "2020-01-01",
-      requires_active_payment: true,
-    });
-    const walkIn = await enrollCustomer(owner, org, service.id, "p12-filled-walkin", {
-      entitlement_type: "TIME",
-      valid_from: "2020-01-01",
-    });
+    await makeServicePaid(owner, service.id);
+    const standing = await enrollCustomer(owner, org, "p12-filled-standing");
+    const walkIn = await enrollCustomer(owner, org, "p12-filled-walkin");
     createdUserIds.push(standing.customer.id, walkIn.customer.id);
 
     const { data: rb } = await owner.client.rpc("admin_create_recurring_booking", {
@@ -275,25 +222,29 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
       p_customer_id: standing.customerRow.id,
     });
 
-    // While the month was unpaid, someone else took the only seat on the
-    // first date.
+    // Someone else paid and took the only seat on the first date.
     const pending = await bookingsOf(owner, rb.id);
     const firstDate = pending.sort((a, b) =>
       a.slot_occurrences.start_at.localeCompare(b.slot_occurrences.start_at),
     )[0]!;
+    await payFor(owner, {
+      organizationId: org.id,
+      customerId: walkIn.customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-1),
+      to: isoDate(200),
+    });
     const taken = await walkIn.customer.client.rpc("book_slot", {
       p_slot_occurrence_id: firstDate.slot_occurrence_id,
     });
     expect(taken.data.status).toBe("OK");
 
-    await owner.client.from("payments").insert({
-      organization_id: org.id,
-      customer_id: standing.customerRow.id,
-      service_entitlement_id: standing.entitlement.id,
-      period_start: isoDate(-1),
-      period_end: isoDate(200),
-      status: "PAID",
-      created_by: owner.id,
+    await payFor(owner, {
+      organizationId: org.id,
+      customerId: standing.customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-1),
+      to: isoDate(200),
     });
 
     const { data: stillPending } = await owner.client
@@ -313,13 +264,8 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
   it("never revives a past date", async () => {
     const { owner, org, service, rule } = await setupPilates("p12-past");
     createdUserIds.push(owner.id);
-    const { customer, customerRow, entitlement } = await enrollCustomer(
-      owner,
-      org,
-      service.id,
-      "p12-past-customer",
-      { entitlement_type: "TIME", valid_from: "2020-01-01", requires_active_payment: true },
-    );
+    await makeServicePaid(owner, service.id);
+    const { customer, customerRow } = await enrollCustomer(owner, org, "p12-past-customer");
     createdUserIds.push(customer.id);
 
     const { data: rb } = await owner.client.rpc("admin_create_recurring_booking", {
@@ -327,9 +273,9 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
       p_customer_id: customerRow.id,
     });
 
-    // A class the customer missed because they hadn't paid. Built with the
-    // service role because the rolling window only ever holds future
-    // dates, and history is exactly what must not be rewritten.
+    // A class the customer missed because they had not paid. Built with
+    // the service role because the rolling window only holds future dates,
+    // and history is exactly what must not be rewritten.
     const past = new Date();
     past.setDate(past.getDate() - 14);
     const { data: pastOccurrence } = await admin
@@ -355,19 +301,17 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
         slot_occurrence_id: pastOccurrence!.id,
         recurring_booking_id: rb.id,
         status: "NOT_GENERATED",
-        not_generated_reason: "NO_ENTITLEMENT",
+        not_generated_reason: "PAYMENT_REQUIRED",
       })
       .select()
       .single();
 
-    await owner.client.from("payments").insert({
-      organization_id: org.id,
-      customer_id: customerRow.id,
-      service_entitlement_id: entitlement.id,
-      period_start: isoDate(-60),
-      period_end: isoDate(200),
-      status: "PAID",
-      created_by: owner.id,
+    await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-60),
+      to: isoDate(200),
     });
 
     const { data: pastAfter } = await admin
@@ -378,52 +322,11 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
     expect(pastAfter?.status).toBe("NOT_GENERATED");
   });
 
-  it("granting the entitlement afterwards unblocks the series", async () => {
-    const { owner, org, service, rule } = await setupPilates("p12-grant");
-    createdUserIds.push(owner.id);
-
-    // The realistic order at a front desk: assign the fixed slot first,
-    // enable the service second.
-    const customer = await createSignedInUser("p12-grant-customer");
-    createdUserIds.push(customer.id);
-    const { data: customerRow } = await owner.client
-      .from("customers")
-      .insert({ organization_id: org.id, profile_id: customer.id, created_by: owner.id })
-      .select()
-      .single();
-
-    const { data: rb } = await owner.client.rpc("admin_create_recurring_booking", {
-      p_schedule_rule_id: rule.id,
-      p_customer_id: customerRow!.id,
-    });
-    const before = await bookingsOf(owner, rb.id);
-    expect(before.length).toBeGreaterThan(0);
-    expect(before.every((b) => b.status === "NOT_GENERATED")).toBe(true);
-    expect(before.every((b) => b.not_generated_reason === "NO_ENTITLEMENT")).toBe(true);
-
-    await owner.client.from("service_entitlements").insert({
-      organization_id: org.id,
-      customer_id: customerRow!.id,
-      service_id: service.id,
-      entitlement_type: "TIME",
-      valid_from: "2020-01-01",
-      requires_active_payment: false,
-      created_by: owner.id,
-    });
-
-    expect((await bookingsOf(owner, rb.id)).every((b) => b.status === "CONFIRMED")).toBe(true);
-  });
-
   it("does not resurrect a cancelled series", async () => {
     const { owner, org, service, rule } = await setupPilates("p12-cancelled");
     createdUserIds.push(owner.id);
-    const { customer, customerRow, entitlement } = await enrollCustomer(
-      owner,
-      org,
-      service.id,
-      "p12-cancelled-customer",
-      { entitlement_type: "TIME", valid_from: "2020-01-01", requires_active_payment: true },
-    );
+    await makeServicePaid(owner, service.id);
+    const { customer, customerRow } = await enrollCustomer(owner, org, "p12-cancelled-customer");
     createdUserIds.push(customer.id);
 
     const { data: rb } = await owner.client.rpc("admin_create_recurring_booking", {
@@ -432,14 +335,12 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
     });
     await owner.client.rpc("cancel_recurring_booking", { p_recurring_booking_id: rb.id });
 
-    await owner.client.from("payments").insert({
-      organization_id: org.id,
-      customer_id: customerRow.id,
-      service_entitlement_id: entitlement.id,
-      period_start: isoDate(-1),
-      period_end: isoDate(200),
-      status: "PAID",
-      created_by: owner.id,
+    await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-1),
+      to: isoDate(200),
     });
 
     const after = await bookingsOf(owner, rb.id);
@@ -447,15 +348,10 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
   });
 
   it("a PENDING payment does not unblock anything", async () => {
-    const { owner, org, service, rule } = await setupPilates("p12-pending-payment");
+    const { owner, org, service, rule } = await setupPilates("p12-pendingpay");
     createdUserIds.push(owner.id);
-    const { customer, customerRow, entitlement } = await enrollCustomer(
-      owner,
-      org,
-      service.id,
-      "p12-pending-payment-customer",
-      { entitlement_type: "TIME", valid_from: "2020-01-01", requires_active_payment: true },
-    );
+    await makeServicePaid(owner, service.id);
+    const { customer, customerRow } = await enrollCustomer(owner, org, "p12-pendingpay-customer");
     createdUserIds.push(customer.id);
 
     const { data: rb } = await owner.client.rpc("admin_create_recurring_booking", {
@@ -463,19 +359,14 @@ describe("Phase 12: pending dates reconcile when the payment lands", () => {
       p_customer_id: customerRow.id,
     });
 
-    const { data: payment } = await owner.client
-      .from("payments")
-      .insert({
-        organization_id: org.id,
-        customer_id: customerRow.id,
-        service_entitlement_id: entitlement.id,
-        period_start: isoDate(-1),
-        period_end: isoDate(200),
-        status: "PENDING",
-        created_by: owner.id,
-      })
-      .select()
-      .single();
+    const { data: payment } = await payFor(owner, {
+      organizationId: org.id,
+      customerId: customerRow.id,
+      serviceId: service.id,
+      from: isoDate(-1),
+      to: isoDate(200),
+      status: "PENDING",
+    });
 
     expect((await bookingsOf(owner, rb.id)).every((b) => b.status === "NOT_GENERATED")).toBe(true);
 
