@@ -209,10 +209,16 @@ describe("Phase 11: standing reservations", () => {
     const late = await enrollCustomer(owner, org, service.id, "p11-fullreason-late");
     createdUserIds.push(holder.customer.id, late.customer.id);
 
+    // The first *future* occurrence, which is what
+    // admin_create_recurring_booking operates on. Taking the earliest one
+    // outright picks today's class when the rule's weekday is today and
+    // its hour has passed, and the series then legitimately skips it --
+    // a latent bug in this test that only fails on the right weekday.
     const { data: occurrences } = await owner.client
       .from("slot_occurrences")
       .select("id")
       .eq("schedule_rule_id", rule.id)
+      .gte("start_at", new Date().toISOString())
       .order("start_at", { ascending: true })
       .limit(1);
     const occurrenceId = occurrences![0]!.id;
