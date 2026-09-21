@@ -392,6 +392,8 @@ export function mapPublicService(row: PublicServiceRow): PublicService {
 export interface PublicAvailabilityRow {
   slot_occurrence_id: string;
   service_id: string;
+  service_name?: string | null;
+  service_color?: string | null;
   start_at: string;
   end_at: string;
   mode: string;
