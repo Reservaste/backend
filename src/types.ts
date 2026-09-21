@@ -90,11 +90,23 @@ export interface Resource {
 
 export type ServiceCancellationReason = "DISCONTINUED_BY_ORGANIZATION";
 
+export type BillingType = "FREE" | "ONE_TIME" | "MONTHLY";
+export type BillingCycle = "CALENDAR_MONTH" | "ROLLING_MONTH";
+
 export interface Service {
   id: string;
   organizationId: string;
   name: string;
   description: string | null;
+  /** Ref: ADR-0022. Economic configuration lives on the service. */
+  billingType: BillingType;
+  /** Required when billingType is MONTHLY, null otherwise. */
+  billingCycle: BillingCycle | null;
+  price: number | null;
+  /** Whether a Payment covering the slot's date is needed to book. */
+  paymentRequired: boolean;
+  /** #rrggbb used to tell services apart on the calendar, or null. */
+  color: string | null;
   /** ADR-0008: null means "use the Organization's default". */
   publicAvailabilityDisplayOverride: PublicAvailabilityDisplay | null;
   isActive: boolean;

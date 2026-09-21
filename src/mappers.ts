@@ -167,6 +167,11 @@ export interface ServiceRow {
   name: string;
   description: string | null;
   public_availability_display_override: string | null;
+  billing_type?: string | null;
+  billing_cycle?: string | null;
+  price?: string | number | null;
+  payment_required?: boolean | null;
+  color?: string | null;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -184,6 +189,11 @@ export function mapService(row: ServiceRow): Service {
     description: row.description,
     publicAvailabilityDisplayOverride:
       row.public_availability_display_override as Service["publicAvailabilityDisplayOverride"],
+    billingType: (row.billing_type ?? "FREE") as Service["billingType"],
+    billingCycle: (row.billing_cycle ?? null) as Service["billingCycle"],
+    price: row.price === null || row.price === undefined ? null : Number(row.price),
+    paymentRequired: row.payment_required ?? false,
+    color: row.color ?? null,
     isActive: row.is_active,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
