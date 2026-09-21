@@ -413,7 +413,8 @@ export function mapBooking(row: BookingRow): Booking {
     customerId: row.customer_id,
     slotOccurrenceId: row.slot_occurrence_id,
     recurringBookingId: row.recurring_booking_id,
-    serviceEntitlementId: row.service_entitlement_id,
+    serviceId: row.service_id,
+    serviceEntitlementId: row.service_entitlement_id ?? null,
     status: row.status as Booking["status"],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -428,7 +429,8 @@ export interface PaymentRow {
   id: string;
   organization_id: string;
   customer_id: string;
-  service_entitlement_id: string;
+  service_id: string;
+  service_entitlement_id?: string | null;
   period_start: string;
   period_end: string;
   status: string;
