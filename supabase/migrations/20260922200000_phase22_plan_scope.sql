@@ -173,9 +173,10 @@ begin
 end;
 $BODY$;
 
-create trigger service_plan_services_immutable
-  before insert or delete or update on public.service_plan_services
-  for each row execute function public.check_service_plan_services_immutable();
+-- The trigger itself is created after the historical backfill below, not
+-- here: this same function would otherwise fire on the migration's own
+-- backfill insert for any plan that already has a real payment, and
+-- reject a write that changes nothing about what that payment bought.
 
 -- ============================================================
 -- 2. Helper: "what does this plan cover, right now" -- one definition
@@ -243,6 +244,22 @@ revoke execute on function public.service_plan_quota_service_ids(uuid, uuid)
 
 insert into public.service_plan_services (service_plan_id, service_id)
 select id, service_id from public.service_plans;
+
+-- Flush the deferred scope-validity check right here: a later ALTER TABLE
+-- on this same table in this transaction (enabling RLS, further down)
+-- cannot run while a constraint trigger still has pending events queued
+-- on it (Postgres error 55006). Flushing also turns "did the backfill
+-- actually give every plan a valid scope" into an immediate, specific
+-- failure instead of a generic one at COMMIT with no idea which insert
+-- caused it.
+set constraints public.service_plan_services_scope_valid immediate;
+
+-- From here on, adding or removing a covered service from a plan that
+-- already has a real payment rewrites retroactively what that payment
+-- bought -- created only now, after the backfill above finished.
+create trigger service_plan_services_immutable
+  before insert or delete or update on public.service_plan_services
+  for each row execute function public.check_service_plan_services_immutable();
 
 -- Triggers that read the column being dropped have to go (or be rewritten)
 -- before the column itself does; relying on CASCADE would only catch the
