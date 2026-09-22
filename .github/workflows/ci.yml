@@ -39,3 +39,45 @@ jobs:
       - run: npm run test:integration
       - if: always()
         run: npx supabase stop
+
+  # Applies pending migrations to the real production database. Gated
+  # behind the `production` GitHub Environment, which the repo settings
+  # configure with a required reviewer -- this job blocks and waits for a
+  # human to click Approve before a single statement runs, no exception.
+  # Not because CI can't be trusted, but because the first migration this
+  # project pushed against real data (Phase 22, 2026-09-22) failed on its
+  # first attempt against production rows no local test had ever
+  # exercised -- a schema change on real payments and credits gets a human
+  # look before it runs, every time.
+  deploy-migrations:
+    needs: [typecheck-and-unit, integration]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      # A second, independent safety net alongside the droplet's own
+      # nightly backup.sh: this one is taken at the exact moment before
+      # THIS migration runs, travels with the workflow run that applied
+      # it, and doesn't depend on the droplet existing at all.
+      - name: Install postgresql-client (for pg_dump)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Backup production before migrating
+        run: |
+          pg_dump "${{ secrets.PROD_DB_URL }}" --schema=public --no-owner --no-privileges \
+            | gzip > pre-migration-backup.sql.gz
+
+      - name: Upload backup as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-migration-backup-${{ github.sha }}
+          path: pre-migration-backup.sql.gz
+          retention-days: 90
+
+      - name: Apply pending migrations to production
+        run: npx supabase db push --db-url "${{ secrets.PROD_DB_URL }}"
