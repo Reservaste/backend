@@ -64,8 +64,22 @@ jobs:
       # nightly backup.sh: this one is taken at the exact moment before
       # THIS migration runs, travels with the workflow run that applied
       # it, and doesn't depend on the droplet existing at all.
-      - name: Install postgresql-client (for pg_dump)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+      #
+      # Plain `postgresql-client` pulls whatever version ubuntu-latest's
+      # default repos ship (16), and pg_dump refuses to dump a NEWER
+      # server than itself as a safety check -- production is Postgres
+      # 17. The PGDG repo is what actually carries postgresql-client-17.
+      - name: Install postgresql-client 17 (for pg_dump)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client-17
 
       # `set -o pipefail`, not the default: without it, this step reported
       # success once already (2026-09-22) while pg_dump itself had failed
