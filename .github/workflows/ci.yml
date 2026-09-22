@@ -67,9 +67,29 @@ jobs:
       - name: Install postgresql-client (for pg_dump)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
 
+      # `set -o pipefail`, not the default: without it, this step reported
+      # success once already (2026-09-22) while pg_dump itself had failed
+      # with no connection at all -- gzip happily compressed empty stdin
+      # into a valid-looking .gz, and being the last command in the pipe,
+      # its own exit code was the only one that mattered. A backup step
+      # that lies about having a backup is worse than one that fails
+      # loudly with nothing.
+      #
+      # PROD_DB_URL goes through env:, not inline `${{ }}` text in the
+      # script: GitHub substitutes an inline secret as literal text before
+      # bash ever parses the line, so a password containing a quote or
+      # backtick could break the command -- or worse. An env var is passed
+      # through the process environment instead, immune to that.
       - name: Backup production before migrating
+        env:
+          PROD_DB_URL: ${{ secrets.PROD_DB_URL }}
         run: |
-          pg_dump "${{ secrets.PROD_DB_URL }}" --schema=public --no-owner --no-privileges \
+          set -o pipefail
+          if [ -z "$PROD_DB_URL" ]; then
+            echo "::error::PROD_DB_URL is not set on this repository -- add it under Settings > Secrets and variables > Actions before this can run."
+            exit 1
+          fi
+          pg_dump "$PROD_DB_URL" --schema=public --no-owner --no-privileges \
             | gzip > pre-migration-backup.sql.gz
 
       - name: Upload backup as a workflow artifact
@@ -80,4 +100,6 @@ jobs:
           retention-days: 90
 
       - name: Apply pending migrations to production
-        run: npx supabase db push --db-url "${{ secrets.PROD_DB_URL }}"
+        env:
+          PROD_DB_URL: ${{ secrets.PROD_DB_URL }}
+        run: npx supabase db push --db-url "$PROD_DB_URL"
