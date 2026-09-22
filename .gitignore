@@ -2,3 +2,4 @@ node_modules/
 *.tsbuildinfo
 .env
 .env.local
+.claude/settings.local.json

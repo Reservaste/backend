@@ -234,7 +234,19 @@ export interface PublicAvailabilitySlot {
 // ---------------------------------------------------------------
 
 export type BookingStatus = "CONFIRMED" | "CANCELLED" | "NOT_GENERATED";
-export type BookingCancellationReason = "CUSTOMER_REQUEST" | "SLOT_CANCELLED" | "RULE_DISCONTINUED";
+/**
+ * SERIES_CANCELLED (ADR-0025 res. 2, Phase 19) is what the cascade of
+ * cancel_recurring_booking() stamps on the series' future children,
+ * whoever asked for it. Before it existed the staff path said
+ * RULE_DISCONTINUED -- and the rule had not been discontinued -- while
+ * the customer path said CUSTOMER_REQUEST, and the customer had not
+ * asked for that particular date.
+ */
+export type BookingCancellationReason =
+  | "CUSTOMER_REQUEST"
+  | "SLOT_CANCELLED"
+  | "RULE_DISCONTINUED"
+  | "SERIES_CANCELLED";
 
 export interface Booking {
   id: string;

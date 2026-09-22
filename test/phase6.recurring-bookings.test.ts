@@ -262,9 +262,14 @@ describe("Phase 6: recurring bookings", () => {
       .from("bookings")
       .select("status, cancellation_reason")
       .eq("recurring_booking_id", rb.id);
+    // The series row records who asked (CUSTOMER_REQUEST, asserted above).
+    // Its children record *what happened to them*, which is neither "the
+    // customer asked for this date" nor "the rule was discontinued":
+    // ADR-0025 res. 2 added SERIES_CANCELLED for exactly this cascade, and
+    // Phase 19 made both branches of cancel_recurring_booking() stamp it.
     for (const b of bookingsAfter!) {
       expect(b.status).toBe("CANCELLED");
-      expect(b.cancellation_reason).toBe("CUSTOMER_REQUEST");
+      expect(b.cancellation_reason).toBe("SERIES_CANCELLED");
     }
   });
 
