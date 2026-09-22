@@ -83,6 +83,71 @@ export const createServiceEntitlementSchema = z
 
 export type CreateServiceEntitlementInput = z.infer<typeof createServiceEntitlementSchema>;
 
+// ADR-0024: the shape of the plan form, not a second implementation of
+// the rule. Whether a payment covers a slot is decided only in
+// PostgreSQL (payment_covers_slot / evaluate_customer_booking); this
+// only keeps a malformed plan from reaching the table -- and the CHECKs
+// there are the real defence, since service_plans is writable through
+// PostgREST.
+const dropInPlanSchema = z.object({
+  planKind: z.literal("DROP_IN"),
+  billingType: z.literal("ONE_TIME").default("ONE_TIME"),
+});
+
+const weeklyQuotaPlanSchema = z.object({
+  planKind: z.literal("WEEKLY_QUOTA"),
+  // No upper bound on purpose: a service can have two rules on the same
+  // weekday, so "<= 7" would be wrong.
+  weeklyQuota: z.coerce.number().int().positive("La frecuencia debe ser al menos 1"),
+  billingType: z.literal("MONTHLY").default("MONTHLY"),
+  billingCycle: z.enum(["CALENDAR_MONTH", "ROLLING_MONTH"]).default("CALENDAR_MONTH"),
+});
+
+const unlimitedPlanSchema = z.object({
+  planKind: z.literal("UNLIMITED"),
+  billingType: z.literal("MONTHLY").default("MONTHLY"),
+  billingCycle: z.enum(["CALENDAR_MONTH", "ROLLING_MONTH"]).default("CALENDAR_MONTH"),
+});
+
+export const createServicePlanSchema = z
+  .object({
+    serviceId: z.string().uuid(),
+    name: z.string().min(2, "El nombre debe tener al menos 2 caracteres").max(120),
+    description: z.string().max(2000).optional(),
+    price: z.coerce.number().min(0, "El precio no puede ser negativo"),
+    sortOrder: z.coerce.number().int().default(0),
+  })
+  .and(
+    z.discriminatedUnion("planKind", [
+      dropInPlanSchema,
+      weeklyQuotaPlanSchema,
+      unlimitedPlanSchema,
+    ]),
+  );
+
+export type CreateServicePlanInput = z.infer<typeof createServicePlanSchema>;
+
+/**
+ * Editing a plan. plan_kind and weekly_quota are deliberately absent:
+ * they are immutable once the plan has non-VOID payments (ADR-0024,
+ * resolution 5), enforced by trigger. Correcting them = deactivate the
+ * plan and create another, which cuts nobody's coverage.
+ */
+export const updateServicePlanSchema = z.object({
+  name: z.string().min(2).max(120).optional(),
+  description: z.string().max(2000).nullable().optional(),
+  price: z.coerce.number().min(0, "El precio no puede ser negativo").optional(),
+  sortOrder: z.coerce.number().int().optional(),
+  isActive: z.coerce.boolean().optional(),
+});
+
+export type UpdateServicePlanInput = z.infer<typeof updateServicePlanSchema>;
+
+/** ISO 4217, as stored in organizations.currency (ADR-0024). */
+export const currencySchema = z
+  .string()
+  .regex(/^[A-Z]{3}$/, "Código de moneda ISO 4217 inválido (ej: UYU)");
+
 export const createScheduleRuleSchema = z.object({
   serviceId: z.string().uuid(),
   resourceId: z.string().uuid(),

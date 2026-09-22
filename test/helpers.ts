@@ -80,16 +80,93 @@ export async function createOrganization(
 }
 
 /**
- * Makes a service payment-gated (ADR-0022). Replaces what a
- * ServiceEntitlement with requires_active_payment used to express, except
- * it now belongs to the service rather than to each customer.
+ * Creates a ServicePlan for a service (ADR-0024). Since Phase 17 a
+ * Payment is anchored to a plan, so a service that is charged for needs
+ * a price list before anyone can pay for it -- the same thing the
+ * payments UI now has to do.
+ */
+export async function createServicePlan(
+  owner: SignedInUser,
+  args: {
+    organizationId: string;
+    serviceId: string;
+    name?: string;
+    planKind?: "DROP_IN" | "WEEKLY_QUOTA" | "UNLIMITED";
+    weeklyQuota?: number;
+    price?: number;
+    cycle?: "CALENDAR_MONTH" | "ROLLING_MONTH";
+  },
+): Promise<string> {
+  const planKind = args.planKind ?? "UNLIMITED";
+  const isDropIn = planKind === "DROP_IN";
+  const { data, error } = await owner.client
+    .from("service_plans")
+    .insert({
+      organization_id: args.organizationId,
+      service_id: args.serviceId,
+      name: args.name ?? (isDropIn ? "Clase suelta" : `Plan ${planKind} ${Math.random().toString(36).slice(2, 8)}`),
+      price: args.price ?? 2000,
+      plan_kind: planKind,
+      weekly_quota: planKind === "WEEKLY_QUOTA" ? (args.weeklyQuota ?? 1) : null,
+      billing_type: isDropIn ? "ONE_TIME" : "MONTHLY",
+      billing_cycle: isDropIn ? null : (args.cycle ?? "CALENDAR_MONTH"),
+      created_by: owner.id,
+    })
+    .select("id")
+    .single();
+  if (error || !data) throw new Error(`failed to create service plan: ${error?.message}`);
+  return data.id as string;
+}
+
+/**
+ * The UNLIMITED plan a payment falls back to when nothing else is
+ * specified -- which is what the Phase 17 compatibility bridge looks for,
+ * and what the backfill gave every pre-existing service. Idempotent so a
+ * test can make a service paid and pay for it without ordering worries.
+ */
+async function ensureUnlimitedPlan(
+  owner: SignedInUser,
+  serviceId: string,
+  cycle: "CALENDAR_MONTH" | "ROLLING_MONTH" = "CALENDAR_MONTH",
+  price = 2000,
+): Promise<string> {
+  const { data: existing } = await owner.client
+    .from("service_plans")
+    .select("id")
+    .eq("service_id", serviceId)
+    .eq("plan_kind", "UNLIMITED")
+    .eq("is_active", true)
+    .limit(1);
+  if (existing && existing.length > 0) return existing[0]!.id as string;
+
+  const { data: service, error } = await owner.client
+    .from("services")
+    .select("id, organization_id, name")
+    .eq("id", serviceId)
+    .single();
+  if (error || !service) throw new Error(`failed to read service ${serviceId}: ${error?.message}`);
+
+  return createServicePlan(owner, {
+    organizationId: service.organization_id as string,
+    serviceId,
+    name: `${service.name} mensual`,
+    planKind: "UNLIMITED",
+    price,
+    cycle,
+  });
+}
+
+/**
+ * Makes a service payment-gated (ADR-0022) and gives it the UNLIMITED
+ * plan that reproduces the pre-ADR-0024 behaviour. Returns the plan id
+ * for the tests that need to talk about the plan itself.
  */
 export async function makeServicePaid(
   owner: SignedInUser,
   serviceId: string,
   cycle: "CALENDAR_MONTH" | "ROLLING_MONTH" = "CALENDAR_MONTH",
   price = 2000,
-) {
+): Promise<string> {
   const { error } = await owner.client
     .from("services")
     .update({
@@ -100,6 +177,8 @@ export async function makeServicePaid(
     })
     .eq("id", serviceId);
   if (error) throw new Error(`failed to make service paid: ${error.message}`);
+
+  return ensureUnlimitedPlan(owner, serviceId, cycle, price);
 }
 
 /** Days from today as an ISO date, for readable payment periods in tests. */
@@ -109,7 +188,14 @@ export function isoDate(offsetDays: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** Registers a payment covering [from, to] for a customer on a service. */
+/**
+ * Registers a payment covering [from, to] for a customer on a service.
+ * Since ADR-0024 a payment is anchored to a ServicePlan: when the caller
+ * does not name one, the service gets (or reuses) its UNLIMITED plan,
+ * which is the plan the compatibility bridge resolves to and the one
+ * that reproduces the old "the month is paid, book what you like"
+ * behaviour. Pass `servicePlanId` to pay for a quota or drop-in plan.
+ */
 export async function payFor(
   owner: SignedInUser,
   args: {
@@ -120,14 +206,20 @@ export async function payFor(
     to: string;
     status?: "PAID" | "PENDING" | "OVERDUE" | "VOID";
     amount?: number;
+    servicePlanId?: string;
+    slotOccurrenceId?: string;
   },
 ) {
+  const servicePlanId = args.servicePlanId ?? (await ensureUnlimitedPlan(owner, args.serviceId));
+
   const { data, error } = await owner.client
     .from("payments")
     .insert({
       organization_id: args.organizationId,
       customer_id: args.customerId,
       service_id: args.serviceId,
+      service_plan_id: servicePlanId,
+      slot_occurrence_id: args.slotOccurrenceId ?? null,
       period_start: args.from,
       period_end: args.to,
       status: args.status ?? "PAID",

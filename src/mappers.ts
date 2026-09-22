@@ -18,6 +18,7 @@ import type {
   ScheduleRule,
   Service,
   ServiceEntitlement,
+  ServicePlan,
   SlotOccurrence,
 } from "./types";
 
@@ -31,6 +32,7 @@ export interface OrganizationRow {
   low_availability_fixed_cap: number | null;
   brand_color?: string | null;
   logo_path?: string | null;
+  currency?: string | null;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -48,6 +50,10 @@ export function mapOrganization(row: OrganizationRow): Organization {
     lowAvailabilityFixedCap: row.low_availability_fixed_cap,
     brandColor: row.brand_color ?? null,
     logoPath: row.logo_path ?? null,
+    // Defaulted rather than optional: the column is NOT NULL DEFAULT
+    // 'UYU' (ADR-0024), and a currency left out of a select must not
+    // read as "no currency" at a price rendering site.
+    currency: row.currency ?? "UYU",
     isActive: row.is_active,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -436,11 +442,56 @@ export function mapBooking(row: BookingRow): Booking {
   };
 }
 
+export interface ServicePlanRow {
+  id: string;
+  organization_id: string;
+  service_id: string;
+  name: string;
+  description: string | null;
+  price: string | number;
+  plan_kind: string;
+  weekly_quota: number | null;
+  billing_type: string;
+  billing_cycle: string | null;
+  is_active: boolean;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  cancelled_at: string | null;
+  cancelled_by: string | null;
+}
+
+export function mapServicePlan(row: ServicePlanRow): ServicePlan {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    serviceId: row.service_id,
+    name: row.name,
+    description: row.description,
+    // numeric(12,2) arrives as a string through PostgREST.
+    price: Number(row.price),
+    planKind: row.plan_kind as ServicePlan["planKind"],
+    weeklyQuota: row.weekly_quota,
+    billingType: row.billing_type as ServicePlan["billingType"],
+    billingCycle: (row.billing_cycle ?? null) as ServicePlan["billingCycle"],
+    isActive: row.is_active,
+    sortOrder: row.sort_order,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    createdBy: row.created_by,
+    cancelledAt: row.cancelled_at,
+    cancelledBy: row.cancelled_by,
+  };
+}
+
 export interface PaymentRow {
   id: string;
   organization_id: string;
   customer_id: string;
   service_id: string;
+  service_plan_id: string;
+  slot_occurrence_id?: string | null;
   service_entitlement_id?: string | null;
   period_start: string;
   period_end: string;
@@ -457,7 +508,9 @@ export function mapPayment(row: PaymentRow): Payment {
     id: row.id,
     organizationId: row.organization_id,
     customerId: row.customer_id,
+    servicePlanId: row.service_plan_id,
     serviceId: row.service_id,
+    slotOccurrenceId: row.slot_occurrence_id ?? null,
     serviceEntitlementId: row.service_entitlement_id ?? null,
     periodStart: row.period_start,
     periodEnd: row.period_end,

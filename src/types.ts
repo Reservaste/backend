@@ -18,6 +18,8 @@ export interface Organization {
   publicAvailabilityDisplay: PublicAvailabilityDisplay;
   lowAvailabilityPercentage: number;
   lowAvailabilityFixedCap: number | null;
+  /** ISO 4217 code every price of this organization is quoted in. Ref: ADR-0024. */
+  currency: string;
   /** Accent colour as #rrggbb, or null for the product default. Ref: ADR-0020. */
   brandColor: string | null;
   /** Object path inside the organization-logos bucket. Ref: ADR-0020. */
@@ -98,10 +100,11 @@ export interface Service {
   organizationId: string;
   name: string;
   description: string | null;
-  /** Ref: ADR-0022. Economic configuration lives on the service. */
+  /** @deprecated ADR-0024. The billing period belongs to ServicePlan. */
   billingType: BillingType;
-  /** Required when billingType is MONTHLY, null otherwise. */
+  /** @deprecated ADR-0024. See ServicePlan.billingCycle. */
   billingCycle: BillingCycle | null;
+  /** @deprecated ADR-0024. A service has several simultaneous prices; see ServicePlan.price. */
   price: number | null;
   /** Whether a Payment covering the slot's date is needed to book. */
   paymentRequired: boolean;
@@ -256,6 +259,49 @@ export interface Booking {
 // ---------------------------------------------------------------
 
 // ---------------------------------------------------------------
+// Phase 17: ServicePlan (ADR-0024)
+// ---------------------------------------------------------------
+
+/**
+ * What a payment buys. `DROP_IN` is a single class, `WEEKLY_QUOTA` is N
+ * fixed weekly slots (N RecurringBooking in force), `UNLIMITED` is the
+ * pre-ADR-0024 behaviour. Generic by design: a single class, a fixed
+ * weekly slot or an unrestricted pass, in any vertical.
+ */
+export type ServicePlanKind = "DROP_IN" | "WEEKLY_QUOTA" | "UNLIMITED";
+
+export interface ServicePlan {
+  id: string;
+  organizationId: string;
+  /** A plan belongs to exactly one Service (ADR-0024 §2.3). */
+  serviceId: string;
+  name: string;
+  description: string | null;
+  /** Rendered with Organization.currency -- the plan has no currency of its own. */
+  price: number;
+  planKind: ServicePlanKind;
+  /**
+   * How many RecurringBooking in force this plan allows, counted for the
+   * slot's local date. Non-null if and only if planKind is
+   * "WEEKLY_QUOTA" -- the database enforces this, not this type.
+   */
+  weeklyQuota: number | null;
+  billingType: BillingType;
+  billingCycle: BillingCycle | null;
+  /**
+   * false means "no longer offered". It never invalidates a payment
+   * already made (ADR-0024 §6.d).
+   */
+  isActive: boolean;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string | null;
+  cancelledAt: string | null;
+  cancelledBy: string | null;
+}
+
+// ---------------------------------------------------------------
 // Phase 7: Payment
 // ---------------------------------------------------------------
 
@@ -265,8 +311,18 @@ export interface Payment {
   id: string;
   organizationId: string;
   customerId: string;
-  /** ADR-0022: a payment covers a service for a customer. */
+  /**
+   * ADR-0024: the registration anchor -- what was bought. The booking
+   * path reads the plan's terms from here.
+   */
+  servicePlanId: string;
+  /** Derived from the plan and verified by trigger, not a second source of truth. */
   serviceId: string;
+  /**
+   * Set exactly for DROP_IN payments: which class was paid. Its period
+   * is the occurrence's local date, on both ends.
+   */
+  slotOccurrenceId: string | null;
   /** @deprecated ADR-0022. Historical provenance only; null on new payments. */
   serviceEntitlementId: string | null;
   periodStart: string;
@@ -316,8 +372,26 @@ export type CanBookReason =
   | "NO_ENTITLEMENT"
   | "SLOT_FULL"
   | "ALREADY_BOOKED"
-  /** Entitlement is live but no PAID period covers the slot's date. Ref: ADR-0013. */
-  | "PAYMENT_REQUIRED";
+  /** No payment covers the slot's date. Ref: ADR-0013, ADR-0022. */
+  | "PAYMENT_REQUIRED"
+  /**
+   * ADR-0024: the month *is* paid, but this booking is not one of the
+   * fixed slots the plan bought. Remedy: pay the single class, use a
+   * make-up credit, or wait. Never render this as "you have to pay".
+   */
+  | "OUTSIDE_PLAN_QUOTA"
+  /** ADR-0024: this series exceeds the plan's frequency. Remedy: upgrade the plan or drop a series. */
+  | "OVER_PLAN_QUOTA"
+  /** ADR-0024: the service demands payment and has no active plan. An owner configuration error. */
+  | "SERVICE_HAS_NO_PLAN";
+
+/** Why a recurring date could not be confirmed. Ref: ADR-0018, ADR-0024. */
+export type NotGeneratedReason =
+  | "SLOT_FULL"
+  | "PAYMENT_REQUIRED"
+  | "DUPLICATE"
+  /** The date belongs to a series that does not fit the plan's quota. */
+  | "OVER_PLAN_QUOTA";
 
 export interface BookSlotResult {
   status: CanBookReason | "DUPLICATE";

@@ -177,10 +177,13 @@ describe("Payments and booking coverage", () => {
   it("CALENDAR_MONTH: paying mid-month covers from the 1st to the last day", async () => {
     const { owner, org, service } = await setupOrg("p7-calendar");
     createdUserIds.push(owner.id);
-    await makeServicePaid(owner, service.id, "CALENDAR_MONTH");
+    // ADR-0024: the billing cycle moved from the Service to the plan, so
+    // this function is asked about the plan now. Same two cycles, same
+    // arithmetic -- only the anchor changed.
+    const planId = await makeServicePaid(owner, service.id, "CALENDAR_MONTH");
 
     const { data } = await owner.client.rpc("billing_period_for", {
-      p_service_id: service.id,
+      p_service_plan_id: planId,
       p_from: "2026-09-15",
     });
 
@@ -191,10 +194,10 @@ describe("Payments and booking coverage", () => {
   it("ROLLING_MONTH: paying on the 15th covers through the 14th of the next month", async () => {
     const { owner, org, service } = await setupOrg("p7-rolling");
     createdUserIds.push(owner.id);
-    await makeServicePaid(owner, service.id, "ROLLING_MONTH");
+    const planId = await makeServicePaid(owner, service.id, "ROLLING_MONTH");
 
     const { data } = await owner.client.rpc("billing_period_for", {
-      p_service_id: service.id,
+      p_service_plan_id: planId,
       p_from: "2026-09-15",
     });
 
@@ -204,7 +207,7 @@ describe("Payments and booking coverage", () => {
     // Month-end is where a naive "+30 days" goes wrong: paying on 31 Jan
     // has to land on the end of February, whatever length it has.
     const { data: endOfMonth } = await owner.client.rpc("billing_period_for", {
-      p_service_id: service.id,
+      p_service_plan_id: planId,
       p_from: "2026-01-31",
     });
     expect(endOfMonth[0].period_end).toBe("2026-02-27");
