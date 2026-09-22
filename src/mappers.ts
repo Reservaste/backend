@@ -5,6 +5,8 @@
 import type {
   Booking,
   Customer,
+  MakeupCredit,
+  MyMakeupCreditRow,
   Organization,
   OrganizationMember,
   Payment,
@@ -112,7 +114,11 @@ export function mapProfile(row: ProfileRow): Profile {
 export interface CustomerRow {
   id: string;
   organization_id: string;
-  profile_id: string;
+  profile_id: string | null;
+  display_name: string | null;
+  phone: string | null;
+  claimed_at: string | null;
+  merged_into_customer_id: string | null;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -127,6 +133,10 @@ export function mapCustomer(row: CustomerRow): Customer {
     id: row.id,
     organizationId: row.organization_id,
     profileId: row.profile_id,
+    displayName: row.display_name,
+    phone: row.phone,
+    claimedAt: row.claimed_at,
+    mergedIntoCustomerId: row.merged_into_customer_id,
     isActive: row.is_active,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -406,6 +416,7 @@ export interface PublicAvailabilityRow {
   status: string | null;
   remaining: number | null;
   capacity: number | null;
+  recently_released?: boolean | null;
 }
 
 export interface BookingRow {
@@ -569,5 +580,81 @@ export function mapPublicAvailabilitySlot(row: PublicAvailabilityRow): PublicAva
     status: row.status as PublicAvailabilitySlot["status"],
     remaining: row.remaining,
     capacity: row.capacity,
+    recentlyReleased: row.recently_released ?? null,
+  };
+}
+
+export interface MakeupCreditRow {
+  id: string;
+  organization_id: string;
+  customer_id: string;
+  service_id: string;
+  origin: string;
+  source_booking_id: string | null;
+  issued_at: string;
+  issued_by: string | null;
+  expires_on: string;
+  expiry_basis: string;
+  expiry_basis_days: number | null;
+  status: string;
+  consumed_booking_id: string | null;
+  consumed_at: string | null;
+  revoked_at: string | null;
+  revoked_by: string | null;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export function mapMakeupCredit(row: MakeupCreditRow): MakeupCredit {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    customerId: row.customer_id,
+    serviceId: row.service_id,
+    origin: row.origin as MakeupCredit["origin"],
+    sourceBookingId: row.source_booking_id,
+    issuedAt: row.issued_at,
+    issuedBy: row.issued_by,
+    expiresOn: row.expires_on,
+    expiryBasis: row.expiry_basis as MakeupCredit["expiryBasis"],
+    expiryBasisDays: row.expiry_basis_days,
+    status: row.status as MakeupCredit["status"],
+    consumedBookingId: row.consumed_booking_id,
+    consumedAt: row.consumed_at,
+    revokedAt: row.revoked_at,
+    revokedBy: row.revoked_by,
+    note: row.note,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** Row shape shared by my_makeup_credits() and organization_customer_makeup_credits() (ADR-0025). */
+export interface MyMakeupCreditRowInput {
+  credit_id: string;
+  organization_name?: string;
+  service_name: string;
+  origin: string;
+  status: string;
+  issued_at: string;
+  expires_on: string;
+  is_expired: boolean;
+  source_start_at?: string | null;
+  note?: string | null;
+}
+
+export function mapMyMakeupCreditRow(row: MyMakeupCreditRowInput): MyMakeupCreditRow {
+  return {
+    creditId: row.credit_id,
+    organizationName: row.organization_name,
+    serviceName: row.service_name,
+    origin: row.origin as MyMakeupCreditRow["origin"],
+    status: row.status as MyMakeupCreditRow["status"],
+    issuedAt: row.issued_at,
+    expiresOn: row.expires_on,
+    isExpired: row.is_expired,
+    sourceStartAt: row.source_start_at ?? null,
+    note: row.note ?? null,
   };
 }

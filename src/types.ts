@@ -57,10 +57,26 @@ export interface Profile {
 
 export type CustomerCancellationReason = "CUSTOMER_REQUEST" | "ORGANIZATION_REMOVED";
 
+/**
+ * ADR-0026: a Customer can now exist without a Profile ("managed
+ * customer") -- created by staff from a name+phone, agendable and
+ * chargeable, with no session and nothing visible to them. `profileId`
+ * becomes non-null ("activated") only through claim_customer_activation()
+ * (or the pre-existing enroll_customer_by_email() self-service path).
+ */
 export interface Customer {
   id: string;
   organizationId: string;
-  profileId: string;
+  /** Null for a managed customer. Ref: ADR-0026. */
+  profileId: string | null;
+  /** Set only when profileId is null (ADR-0026 customers_identity_or_name). */
+  displayName: string | null;
+  /** E.164 with leading "+", normalized by create_managed_customer(). */
+  phone: string | null;
+  /** When this row went from managed to activated, or null. */
+  claimedAt: string | null;
+  /** Set by merge_customers() on the (now inactive) source row. Ref: ADR-0026 Sec 2.5. */
+  mergedIntoCustomerId: string | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -192,6 +208,59 @@ export interface SlotOccurrence {
 // services_public, get_public_availability -- never the base tables)
 // ---------------------------------------------------------------
 
+// ---------------------------------------------------------------
+// Phase 20: MakeupCredit (ADR-0025)
+// ---------------------------------------------------------------
+
+export type MakeupCreditOrigin = "CUSTOMER_RELEASE" | "ORGANIZATION_CANCELLED" | "MANUAL";
+export type MakeupCreditStatus = "AVAILABLE" | "CONSUMED" | "REVOKED";
+export type MakeupCreditExpiryBasis = "END_OF_MONTH" | "END_OF_BILLING_PERIOD" | "DAYS_AFTER";
+
+/**
+ * The right to ONE extra booking (ADR-0024's sense of "extra") on a
+ * Service, earned by releasing a seat in time or by an organization-side
+ * cancellation. Never a prepaid package: it is not bought, not recharged,
+ * and its count can never exceed the bookings the customer actually lost.
+ * `expiresOn` is frozen at issuance -- nothing recomputes it later.
+ */
+export interface MakeupCredit {
+  id: string;
+  organizationId: string;
+  customerId: string;
+  serviceId: string;
+  origin: MakeupCreditOrigin;
+  /** Null exactly when origin is "MANUAL". */
+  sourceBookingId: string | null;
+  issuedAt: string;
+  issuedBy: string | null;
+  /** Frozen at issuance, anchored to the released occurrence's local date -- never recomputed. */
+  expiresOn: string;
+  expiryBasis: MakeupCreditExpiryBasis;
+  expiryBasisDays: number | null;
+  status: MakeupCreditStatus;
+  consumedBookingId: string | null;
+  consumedAt: string | null;
+  revokedAt: string | null;
+  revokedBy: string | null;
+  note: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One row of my_makeup_credits() / organization_customer_makeup_credits(). is_expired is computed in SQL. */
+export interface MyMakeupCreditRow {
+  creditId: string;
+  organizationName?: string;
+  serviceName: string;
+  origin: MakeupCreditOrigin;
+  status: MakeupCreditStatus;
+  issuedAt: string;
+  expiresOn: string;
+  isExpired: boolean;
+  sourceStartAt?: string | null;
+  note?: string | null;
+}
+
 export interface PublicOrganization {
   id: string;
   slug: string;
@@ -227,6 +296,14 @@ export interface PublicAvailabilitySlot {
   status: "AVAILABLE" | "LOW" | "FULL" | null;
   remaining: number | null;
   capacity: number | null;
+  /**
+   * ADR-0025: a seat freed by a customer's own on-time release in the last
+   * 72h. No count, no actor, no timestamp -- and null (not false) when
+   * ADR-0008 suppresses it: BOOLEAN disclosure mode, or capacity 1 (where
+   * "released" would be indistinguishable from "there was a booking and
+   * it got cancelled", ADR-0007's original problem).
+   */
+  recentlyReleased: boolean | null;
 }
 
 // ---------------------------------------------------------------
@@ -408,6 +485,8 @@ export type NotGeneratedReason =
 export interface BookSlotResult {
   status: CanBookReason | "DUPLICATE";
   booking?: Booking;
+  /** ADR-0025: set when the booking was covered by a MakeupCredit, which book_slot()/admin_book_for_customer() then consumed atomically. */
+  makeupCreditId?: string | null;
 }
 
 export type EntitlementType = "TIME" | "CREDITS";
