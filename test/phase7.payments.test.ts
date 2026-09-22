@@ -229,9 +229,10 @@ describe("Payments and booking coverage", () => {
     const first = await payFor(owner, { ...base, from: "2026-01-01", to: "2026-01-31" });
     expect(first.error).toBeNull();
 
-    // Same month charged twice.
+    // Same month charged twice. ADR-0029 moved this EXCLUDE off payments
+    // and onto payment_service_coverage (S4.2) -- same rule, new name.
     const overlapping = await payFor(owner, { ...base, from: "2026-01-15", to: "2026-02-15" });
-    expect(overlapping.error?.message).toContain("payments_no_overlapping_paid");
+    expect(overlapping.error?.message).toContain("payment_service_coverage_no_overlap");
 
     // A gap is a valid, expected state: the customer simply did not pay
     // February. Deliberately not a constraint violation.

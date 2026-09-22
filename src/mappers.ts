@@ -456,12 +456,13 @@ export function mapBooking(row: BookingRow): Booking {
 export interface ServicePlanRow {
   id: string;
   organization_id: string;
-  service_id: string;
+  applies_to_all_services: boolean;
   name: string;
   description: string | null;
   price: string | number;
   plan_kind: string;
   weekly_quota: number | null;
+  quota_scope: string | null;
   billing_type: string;
   billing_cycle: string | null;
   is_active: boolean;
@@ -473,17 +474,26 @@ export interface ServicePlanRow {
   cancelled_by: string | null;
 }
 
-export function mapServicePlan(row: ServicePlanRow): ServicePlan {
+/**
+ * ADR-0029: `service_plans` no longer carries `service_id` -- the covered
+ * services live in the `service_plan_services` join table (or are resolved
+ * live from `applies_to_all_services`). Callers fetch that separately
+ * (there is no single-query PostgREST shape for "this table plus this
+ * join, aggregated") and pass the result in here.
+ */
+export function mapServicePlan(row: ServicePlanRow, serviceIds: string[]): ServicePlan {
   return {
     id: row.id,
     organizationId: row.organization_id,
-    serviceId: row.service_id,
+    serviceIds,
+    appliesToAllServices: row.applies_to_all_services,
     name: row.name,
     description: row.description,
     // numeric(12,2) arrives as a string through PostgREST.
     price: Number(row.price),
     planKind: row.plan_kind as ServicePlan["planKind"],
     weeklyQuota: row.weekly_quota,
+    quotaScope: (row.quota_scope ?? null) as ServicePlan["quotaScope"],
     billingType: row.billing_type as ServicePlan["billingType"],
     billingCycle: (row.billing_cycle ?? null) as ServicePlan["billingCycle"],
     isActive: row.is_active,
@@ -500,7 +510,8 @@ export interface PaymentRow {
   id: string;
   organization_id: string;
   customer_id: string;
-  service_id: string;
+  /** ADR-0029: null when the plan behind this payment covers several services. */
+  service_id: string | null;
   service_plan_id: string;
   slot_occurrence_id?: string | null;
   service_entitlement_id?: string | null;

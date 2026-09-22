@@ -109,13 +109,26 @@ const unlimitedPlanSchema = z.object({
   billingCycle: z.enum(["CALENDAR_MONTH", "ROLLING_MONTH"]).default("CALENDAR_MONTH"),
 });
 
+// ADR-0029: a plan covers one, several, or all of the organization's
+// services -- appliesToAllServices and serviceIds are mutually exclusive
+// (the database is the real defence, via validate_service_plan_scope()).
+// Left loose here rather than encoded as a second discriminated union on
+// top of planKind's, for the same reason the rest of this schema reads
+// back from FormData instead of narrowing an intersection-of-unions: the
+// server action builds the exact RPC call explicitly.
 export const createServicePlanSchema = z
   .object({
-    serviceId: z.string().uuid(),
+    appliesToAllServices: z.coerce.boolean().default(false),
+    serviceIds: z.array(z.string().uuid()).default([]),
     name: z.string().min(2, "El nombre debe tener al menos 2 caracteres").max(120),
     description: z.string().max(2000).optional(),
     price: z.coerce.number().min(0, "El precio no puede ser negativo"),
     sortOrder: z.coerce.number().int().default(0),
+    // Required only when the plan covers more than one service and is
+    // WEEKLY_QUOTA (ADR-0029 §3) -- the database enforces "non-null iff
+    // WEEKLY_QUOTA"; this only adds the finer "iff more than one service"
+    // half so the form can require it exactly when it is shown.
+    quotaScope: z.enum(["PER_SERVICE", "SHARED_ACROSS_SERVICES"]).optional(),
   })
   .and(
     z.discriminatedUnion("planKind", [

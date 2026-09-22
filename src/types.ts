@@ -359,11 +359,28 @@ export interface Booking {
  */
 export type ServicePlanKind = "DROP_IN" | "WEEKLY_QUOTA" | "UNLIMITED";
 
+/**
+ * ADR-0029: how a WEEKLY_QUOTA's weeklyQuota is measured when the plan
+ * covers more than one Service. PER_SERVICE -- the quota applies to each
+ * covered service independently (the pre-ADR-0029 behaviour, generalized).
+ * SHARED_ACROSS_SERVICES -- one pool of N series total, spent on any
+ * combination of the covered services. Non-null if and only if planKind is
+ * "WEEKLY_QUOTA".
+ */
+export type PlanQuotaScope = "PER_SERVICE" | "SHARED_ACROSS_SERVICES";
+
 export interface ServicePlan {
   id: string;
   organizationId: string;
-  /** A plan belongs to exactly one Service (ADR-0024 §2.3). */
-  serviceId: string;
+  /**
+   * ADR-0029: a plan covers one, several, or all of the organization's
+   * Service. `serviceIds` is the explicit, closed selection
+   * (service_plan_services); when `appliesToAllServices` is true it is
+   * resolved live against the organization's active services instead
+   * (never both -- the database enforces mutual exclusion).
+   */
+  serviceIds: string[];
+  appliesToAllServices: boolean;
   name: string;
   description: string | null;
   /** Rendered with Organization.currency -- the plan has no currency of its own. */
@@ -375,6 +392,8 @@ export interface ServicePlan {
    * "WEEKLY_QUOTA" -- the database enforces this, not this type.
    */
   weeklyQuota: number | null;
+  /** ADR-0029: required exactly when planKind is "WEEKLY_QUOTA". */
+  quotaScope: PlanQuotaScope | null;
   billingType: BillingType;
   billingCycle: BillingCycle | null;
   /**
@@ -405,8 +424,12 @@ export interface Payment {
    * path reads the plan's terms from here.
    */
   servicePlanId: string;
-  /** Derived from the plan and verified by trigger, not a second source of truth. */
-  serviceId: string;
+  /**
+   * Derived from the plan and verified by trigger, not a second source of
+   * truth. ADR-0029: null when the plan covers more than one service --
+   * see PaymentServiceCoverage for the full coverage of that payment.
+   */
+  serviceId: string | null;
   /**
    * Set exactly for DROP_IN payments: which class was paid. Its period
    * is the occurrence's local date, on both ends.

@@ -84,6 +84,23 @@ export async function createOrganization(
  * Payment is anchored to a plan, so a service that is charged for needs
  * a price list before anyone can pay for it -- the same thing the
  * payments UI now has to do.
+ *
+ * ADR-0029: `service_plans.service_id` is gone -- a plan's covered
+ * services live in `service_plan_services` (or are resolved live from
+ * `applies_to_all_services`), and `validate_service_plan_scope()` is a
+ * DEFERRED constraint trigger that fires at end-of-transaction. Two
+ * separate PostgREST requests (insert the plan, then insert the link row)
+ * are two separate transactions -- the first would commit, and INSIDE
+ * that same commit the deferred check sees a plan with zero covered
+ * services and rejects it with SERVICE_PLAN_SCOPE_EMPTY before a second
+ * request ever gets a chance to run (confirmed against the real database,
+ * not just reasoned about). That is exactly why production creates a
+ * scoped plan through the `create_service_plan` RPC instead of a plain
+ * insert (ADR-0004's "two `.from()` calls are two transactions" applied to
+ * this new cross-table invariant) -- this helper goes through the same
+ * RPC, reproducing the one-service PER_SERVICE case every existing test
+ * wants. The public `args.serviceId` shape is unchanged, so none of the
+ * ~30 call sites need to change.
  */
 export async function createServicePlan(
   owner: SignedInUser,
@@ -99,23 +116,22 @@ export async function createServicePlan(
 ): Promise<string> {
   const planKind = args.planKind ?? "UNLIMITED";
   const isDropIn = planKind === "DROP_IN";
-  const { data, error } = await owner.client
-    .from("service_plans")
-    .insert({
-      organization_id: args.organizationId,
-      service_id: args.serviceId,
-      name: args.name ?? (isDropIn ? "Clase suelta" : `Plan ${planKind} ${Math.random().toString(36).slice(2, 8)}`),
-      price: args.price ?? 2000,
-      plan_kind: planKind,
-      weekly_quota: planKind === "WEEKLY_QUOTA" ? (args.weeklyQuota ?? 1) : null,
-      billing_type: isDropIn ? "ONE_TIME" : "MONTHLY",
-      billing_cycle: isDropIn ? null : (args.cycle ?? "CALENDAR_MONTH"),
-      created_by: owner.id,
-    })
-    .select("id")
-    .single();
+  const { data, error } = await owner.client.rpc("create_service_plan", {
+    p_organization_id: args.organizationId,
+    p_name: args.name ?? (isDropIn ? "Clase suelta" : `Plan ${planKind} ${Math.random().toString(36).slice(2, 8)}`),
+    p_description: null,
+    p_price: args.price ?? 2000,
+    p_plan_kind: planKind,
+    p_weekly_quota: planKind === "WEEKLY_QUOTA" ? (args.weeklyQuota ?? 1) : null,
+    p_billing_type: isDropIn ? "ONE_TIME" : "MONTHLY",
+    p_billing_cycle: isDropIn ? null : (args.cycle ?? "CALENDAR_MONTH"),
+    p_sort_order: 0,
+    p_applies_to_all_services: false,
+    p_service_ids: [args.serviceId],
+    p_quota_scope: planKind === "WEEKLY_QUOTA" ? "PER_SERVICE" : null,
+  });
   if (error || !data) throw new Error(`failed to create service plan: ${error?.message}`);
-  return data.id as string;
+  return (data as { id: string }).id;
 }
 
 /**
@@ -130,10 +146,14 @@ async function ensureUnlimitedPlan(
   cycle: "CALENDAR_MONTH" | "ROLLING_MONTH" = "CALENDAR_MONTH",
   price = 2000,
 ): Promise<string> {
+  // ADR-0029: service_plans has no service_id column anymore -- filtering
+  // "does an UNLIMITED plan cover this service" goes through the join
+  // table (an embedded-resource filter, `!inner` so the embed also
+  // restricts the parent rows instead of just annotating them).
   const { data: existing } = await owner.client
     .from("service_plans")
-    .select("id")
-    .eq("service_id", serviceId)
+    .select("id, service_plan_services!inner(service_id)")
+    .eq("service_plan_services.service_id", serviceId)
     .eq("plan_kind", "UNLIMITED")
     .eq("is_active", true)
     .limit(1);
