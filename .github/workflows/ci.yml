@@ -31,6 +31,15 @@ jobs:
       - uses: supabase/setup-cli@v1
         with:
           version: latest
+      # `supabase start` pulls ~15 Supabase images from ghcr.io. Unauthenticated
+      # (the default), those pulls count against ghcr.io's shared anonymous
+      # rate limit, pooled across every GitHub Actions runner on the range --
+      # not just this repo's traffic -- which is what was tripping
+      # `toomanyrequests` here repeatedly on 2026-09-23 even on a lone rerun.
+      # GITHUB_TOKEN already carries public-package read access; logging in
+      # with it moves these pulls to the much higher per-token quota.
+      - name: Log in to GHCR (avoids the shared anonymous pull rate limit)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       # supabase start applies every migration under supabase/migrations/
       # from scratch -- this is the same check as `npx supabase db reset`,
       # so a migration that only "worked" against a hand-patched local DB
