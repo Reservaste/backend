@@ -206,7 +206,14 @@ describe("Phase 11: standing reservations", () => {
     expect(row.status).toBe("ACTIVE");
     expect(row.upcoming_confirmed).toBe(0);
     expect(row.upcoming_not_generated).toBeGreaterThan(0);
-    expect(row.upcoming_unpaid).toBe(row.upcoming_not_generated);
+    // Fase 25: `upcoming_unpaid` ya no es "todas las fechas sin confirmar".
+    // La ventana rodante son 90 días (ADR-0009) y un pago mensual cubre
+    // uno, así que contarlas todas dejaba la etiqueta "Falta el pago"
+    // encendida para siempre, incluso con el mes al día -- que es
+    // exactamente lo que reportó el primer cliente. Lo que se cobra hoy va
+    // en `upcoming_unpaid`; lo de más adelante, en `upcoming_beyond_period`.
+    expect(row.upcoming_unpaid).toBeGreaterThan(0);
+    expect(row.upcoming_unpaid + row.upcoming_beyond_period).toBe(row.upcoming_not_generated);
 
     // And the customer is told, instead of the class disappearing.
     const { data: mine } = await customer.client.rpc("my_bookings");
