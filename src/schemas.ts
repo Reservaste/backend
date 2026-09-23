@@ -197,3 +197,26 @@ export const createScheduleExceptionSchema = z
   );
 
 export type CreateScheduleExceptionInput = z.infer<typeof createScheduleExceptionSchema>;
+
+// ADR-0030 resolution 2: the /contacto landing form. Edge validation only
+// -- the real defence is submit_platform_contact_request() in
+// backend/supabase/migrations, which re-validates format/length and is
+// the only thing PostgREST actually lets anon/authenticated call (RLS on
+// platform_contact_requests has zero policies, so a direct insert is
+// rejected regardless of what this schema allows). Bounds mirror the SQL
+// CHECK constraints exactly so a rejection here and a rejection there
+// mean the same thing.
+export const submitContactRequestSchema = z.object({
+  name: z.string().trim().min(1, "Contanos tu nombre").max(200),
+  email: z.string().trim().max(320).email("Email inválido"),
+  message: z.string().trim().min(1, "Contanos brevemente qué necesitás").max(4000),
+  phone: z
+    .string()
+    .trim()
+    .regex(/^\+?[0-9 ()-]{6,20}$/, "Formato de teléfono inválido")
+    .optional()
+    .or(z.literal("")),
+  businessType: z.string().trim().max(120).optional().or(z.literal("")),
+});
+
+export type SubmitContactRequestInput = z.infer<typeof submitContactRequestSchema>;
