@@ -136,6 +136,61 @@ describe("Phase 11: standing reservations", () => {
     expect(mine.length).toBeGreaterThan(0);
   });
 
+  it("the series has no end date: it keeps taking dates as the rolling window advances", async () => {
+    const { owner, org, service, rule } = await setupPilates("p11-openended", 10);
+    createdUserIds.push(owner.id);
+    const { customer, customerRow } = await enrollCustomer(
+      owner,
+      org,
+      service.id,
+      "p11-openended-customer",
+    );
+    createdUserIds.push(customer.id);
+
+    // Nótese que no se pide preview: el camino rápido del mostrador es una
+    // sola llamada, y todo lo que protege la operación (membresía, cliente
+    // de la organización, serie duplicada, cupo del plan) vive acá adentro.
+    const { data: rb } = await owner.client.rpc("admin_create_recurring_booking", {
+      p_schedule_rule_id: rule.id,
+      p_customer_id: customerRow.id,
+    });
+
+    // Nadie elige una fecha de corte y la RPC no la inventa: la serie nace
+    // abierta. Esto es lo que habilita a la pantalla a prometer "sin fecha
+    // de fin, hasta que lo quites" sin mentir.
+    expect(rb.end_date).toBeNull();
+
+    const countBookings = async () => {
+      const { count } = await owner.client
+        .from("bookings")
+        .select("id", { count: "exact", head: true })
+        .eq("recurring_booking_id", rb.id);
+      return count ?? 0;
+    };
+    const before = await countBookings();
+    expect(before).toBeGreaterThan(0);
+
+    // La ventana rodante de ADR-0009 avanzando: en producción es pg_cron,
+    // acá se fuerza pidiendo un horizonte más largo. Lo que se verifica es
+    // que las ocurrencias nuevas se le siguen asignando a la serie -- sin
+    // eso, "indeterminadamente" duraría exactamente 90 días.
+    const { error } = await admin.rpc("generate_slot_occurrences_for_rule", {
+      p_schedule_rule_id: rule.id,
+      p_horizon_days: 180,
+    });
+    expect(error).toBeNull();
+
+    expect(await countBookings()).toBeGreaterThan(before);
+
+    const { data: rbAfter } = await owner.client
+      .from("recurring_bookings")
+      .select("status, end_date")
+      .eq("id", rb.id)
+      .single();
+    expect(rbAfter?.status).toBe("ACTIVE");
+    expect(rbAfter?.end_date).toBeNull();
+  });
+
   it("preview on someone's behalf reports the same reasons and books nothing", async () => {
     const { owner, org, service, rule } = await setupPilates("p11-preview", 10);
     createdUserIds.push(owner.id);
