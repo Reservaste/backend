@@ -157,10 +157,20 @@ describe("Phase 21 -- managed customers (ADR-0026), emergency verification", () 
     const plainToken = issuedRow?.token;
     expect(plainToken).toBeTruthy();
 
-    const { error: claimErr } = await claimant.client.rpc("claim_customer_activation", {
+    const { data: claimed, error: claimErr } = await claimant.client.rpc("claim_customer_activation", {
       p_token: plainToken,
     });
     expect(claimErr).toBeNull();
+
+    // El canje tiene que decir de QUÉ negocio era la invitación: es lo
+    // único que permite aterrizar a la persona en la agenda del negocio
+    // que la invitó (ADR-0023) en vez de en un portal genérico y vacío
+    // -- el callejón sin salida que reportó el feedback de producción
+    // ("cuando me invitan como usuario no veo la agenda como para
+    // comprar o reservar"). El slug sale del token adentro de la RPC, el
+    // caller nunca lo elige.
+    expect((claimed as { status: string }).status).toBe("OK");
+    expect((claimed as { organization_slug: string }).organization_slug).toBe(org.slug);
 
     const { data: linked } = await admin.from("customers").select("profile_id, claimed_at").eq("id", customerId).single();
     expect(linked?.profile_id).toBe(claimant.id);
@@ -175,5 +185,94 @@ describe("Phase 21 -- managed customers (ADR-0026), emergency verification", () 
     // Second claim must never have moved the link away from the real claimant.
     const { data: stillLinked } = await admin.from("customers").select("profile_id").eq("id", customerId).single();
     expect(stillLinked?.profile_id).toBe(claimant.id);
+  });
+
+  /**
+   * Regression guard for the production bug reported on 2026-09-23: "el
+   * primer intento de abrir el link ya dice que está expirado".
+   *
+   * The expiry itself was never wrong -- these tests pin that down -- but
+   * 72h is a number the frontend has to mirror, because the clear token
+   * survives only in the cookie the activation route hands out (the
+   * database keeps a SHA-256 and nothing else). That cookie was living 15
+   * minutes. Anything that asserts the TTL has to assert it on both
+   * sides: here, and in `frontend/app/activar/[token]/route.test.ts`,
+   * which requires the cookie to outlive whatever this window is.
+   */
+  describe("activation window (ADR-0026 resolution 8: 72h)", () => {
+    async function issueFor(displayName: string) {
+      const owner = await createSignedInUser("owner-ttl");
+      const org = await createOrganization(owner, "org-ttl");
+      const { data: customer, error: createErr } = await owner.client.rpc("create_managed_customer", {
+        p_organization_id: org.id,
+        p_display_name: displayName,
+        // Unique per call: `customers_organization_phone_idx` is per
+        // organization, but a shared literal makes reruns confusing.
+        p_phone: `+5989${Math.floor(1000000 + Math.random() * 8999999)}`,
+      });
+      expect(createErr).toBeNull();
+
+      const { data: issued, error: issueErr } = await owner.client.rpc("issue_customer_activation", {
+        p_customer_id: customer!.id,
+      });
+      expect(issueErr).toBeNull();
+      const row = Array.isArray(issued) ? issued[0] : issued;
+      return { owner, org, customerId: customer!.id as string, activationId: row.activation_id as string, token: row.token as string };
+    }
+
+    it("issues a token that lasts exactly 72h and is claimable immediately", async () => {
+      const { activationId, token } = await issueFor("TTL Recién Emitido");
+
+      const { data: row } = await admin
+        .from("customer_activations")
+        .select("created_at, expires_at")
+        .eq("id", activationId)
+        .single();
+
+      const ttlHours =
+        (new Date(row!.expires_at as string).getTime() - new Date(row!.created_at as string).getTime()) / 3_600_000;
+      expect(ttlHours).toBe(72);
+      // Both columns are timestamptz and both come from the same now():
+      // a fresh link can never read as already expired, whatever the
+      // server's or the organization's timezone is.
+      expect(new Date(row!.expires_at as string).getTime()).toBeGreaterThan(Date.now());
+
+      const claimant = await createSignedInUser("claimant-immediate");
+      const { data: result, error } = await claimant.client.rpc("claim_customer_activation", { p_token: token });
+      expect(error).toBeNull();
+      expect((result as { status?: string })?.status).toBe("OK");
+    });
+
+    it("still claims at the far edge of the window, and only fails past it", async () => {
+      const edge = await issueFor("TTL Casi Vencido");
+      await admin
+        .from("customer_activations")
+        .update({ expires_at: new Date(Date.now() + 5_000).toISOString() })
+        .eq("id", edge.activationId);
+
+      const edgeClaimant = await createSignedInUser("claimant-edge");
+      const { error: edgeErr } = await edgeClaimant.client.rpc("claim_customer_activation", { p_token: edge.token });
+      expect(edgeErr).toBeNull();
+
+      const past = await issueFor("TTL Vencido");
+      await admin
+        .from("customer_activations")
+        .update({ expires_at: new Date(Date.now() - 1_000).toISOString() })
+        .eq("id", past.activationId);
+
+      const lateClaimant = await createSignedInUser("claimant-late");
+      const { error: lateErr } = await lateClaimant.client.rpc("claim_customer_activation", { p_token: past.token });
+      expect(lateErr).not.toBeNull();
+      expect(lateErr!.message).toMatch(/ACTIVATION_EXPIRED/);
+
+      // An expired link is not a consumed link: it stays unredeemed, so
+      // reissuing is what fixes it (and the customer keeps no profile).
+      const { data: after } = await admin
+        .from("customer_activations")
+        .select("redeemed_at")
+        .eq("id", past.activationId)
+        .single();
+      expect(after?.redeemed_at).toBeNull();
+    });
   });
 });
