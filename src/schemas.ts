@@ -6,11 +6,39 @@ import { z } from "zod";
 
 const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+/**
+ * Top-level route segments of the frontend app (`frontend/app/*`). A slug
+ * equal to one of these would be captured by the route instead of by the
+ * organization's public page (`/[organizationSlug]`) -- or worse, would make
+ * `/equipo/[token]` or `/activar/[token]` ambiguous. Mirrored EXACTLY by
+ * `organizations_slug_not_reserved_check` in SQL (Phase 27b), which is the
+ * real boundary; this copy only gives the form a readable message. Adding a
+ * new top-level route means adding it here AND in a new migration.
+ */
+export const RESERVED_ORGANIZATION_SLUGS = [
+  "_next",
+  "activar",
+  "admin",
+  "api",
+  "auth",
+  "contacto",
+  "dashboard",
+  "equipo",
+  "login",
+  "me",
+  "onboarding",
+  "org",
+  "signup",
+] as const;
+
+const reservedSlugs: ReadonlySet<string> = new Set(RESERVED_ORGANIZATION_SLUGS);
+
 export const organizationSlugSchema = z
   .string()
   .min(2, "El slug debe tener al menos 2 caracteres")
   .max(60, "El slug no puede tener más de 60 caracteres")
-  .regex(slugPattern, "Solo minúsculas, números y guiones (ej: iron-gym)");
+  .regex(slugPattern, "Solo minúsculas, números y guiones (ej: iron-gym)")
+  .refine((slug) => !reservedSlugs.has(slug), "Ese nombre está reservado, elegí otro");
 
 export const timezoneSchema = z
   .string()

@@ -6,6 +6,7 @@ import {
   inviteTeamMemberSchema,
   setMemberRoleSchema,
   organizationSlugSchema,
+  RESERVED_ORGANIZATION_SLUGS,
   signUpSchema,
   submitContactRequestSchema,
   timezoneSchema,
@@ -26,6 +27,17 @@ describe("organizationSlugSchema", () => {
 
   it("rejects a slug that is too short", () => {
     expect(organizationSlugSchema.safeParse("a").success).toBe(false);
+  });
+
+  it("rejects every reserved top-level route segment (Phase 27b)", () => {
+    for (const slug of RESERVED_ORGANIZATION_SLUGS) {
+      expect(organizationSlugSchema.safeParse(slug).success, slug).toBe(false);
+    }
+  });
+
+  it("accepts a slug that only contains a reserved word", () => {
+    expect(organizationSlugSchema.safeParse("equipo-norte").success).toBe(true);
+    expect(organizationSlugSchema.safeParse("mega").success).toBe(true);
   });
 });
 
