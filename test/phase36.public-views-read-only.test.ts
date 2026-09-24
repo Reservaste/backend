@@ -14,10 +14,17 @@
 // un DELETE denegado por **ausencia de policy RLS** no da error (0 filas,
 // 204). Un DELETE denegado por **falta de privilegio de tabla** sí da
 // error: `42501`. Acá conviven las dos formas -- las vistas (secciones
-// 1-4) fallan con 42501; las tablas (secciones 6-8) fallan en silencio con
-// 0 filas. En los dos casos el test afirma además que la fila sobrevive:
-// afirmar sólo el código de error daría un falso verde el día que alguien
-// vuelva a abrir la puerta por el otro mecanismo.
+// 1-4) fallan con 42501; `organization_members` (sección 6) falla en
+// silencio con 0 filas. En los dos casos el test afirma además que la fila
+// sobrevive: afirmar sólo el código de error daría un falso verde el día
+// que alguien vuelva a abrir la puerta por el otro mecanismo.
+//
+// Los otros dos hallazgos de ADR-0037 -- `organization_roles` y
+// `service_plan_services` -- se prueban en
+// `phase36b.role-and-plan-scope-delete-closed.test.ts`, porque su migración
+// (`20260923240000_phase36b_...`) depende de la Fase 32 y se aplica después
+// de ella. Este archivo se queda sólo con lo que se sostiene contra el
+// historial commiteado.
 //
 // Requiere una instancia local de Supabase corriendo.
 
@@ -27,7 +34,6 @@ import {
   admin,
   ANON_KEY,
   createOrganization,
-  createServicePlan,
   createSignedInUser,
   firstFutureOccurrence,
   isoDate,
@@ -74,8 +80,6 @@ describe("Fase 36 -- ADR-0037: vistas públicas sólo de lectura", () => {
   let outsider: SignedInUser;
   let org: { id: string; slug: string };
   let serviceId: string;
-  let secondServiceId: string;
-  let thirdServiceId: string;
   let ruleId: string;
   let customerId: string;
   let occurrenceId: string;
@@ -88,8 +92,6 @@ describe("Fase 36 -- ADR-0037: vistas públicas sólo de lectura", () => {
   let ownerMemberId: string;
   let staffMemberId: string;
   let staffUserId: string;
-  let defaultRoleId: string;
-  let scopePlanId: string;
 
   beforeAll(async () => {
     owner = await newUser("p36-owner");
@@ -100,16 +102,14 @@ describe("Fase 36 -- ADR-0037: vistas públicas sólo de lectura", () => {
       .from("services")
       .insert([
         { organization_id: org.id, name: "Pilates", created_by: owner.id },
-        { organization_id: org.id, name: "Funcional", created_by: owner.id },
-        { organization_id: org.id, name: "Spinning", created_by: owner.id },
         { organization_id: org.id, name: "Yoga", created_by: owner.id },
         { organization_id: org.id, name: "Aparatos", created_by: owner.id },
       ])
       .select("id");
     expect(servicesError).toBeNull();
-    [serviceId, secondServiceId, thirdServiceId, unplannedServiceId, globalOnlyServiceId] = (
-      services as { id: string }[]
-    ).map((s) => s.id);
+    [serviceId, unplannedServiceId, globalOnlyServiceId] = (services as { id: string }[]).map(
+      (s) => s.id,
+    );
 
     const { data: resource, error: resourceError } = await owner.client
       .from("resources")
@@ -238,25 +238,6 @@ describe("Fase 36 -- ADR-0037: vistas públicas sólo de lectura", () => {
       .single();
     expect(ownerMemberError).toBeNull();
     ownerMemberId = ownerMember!.id as string;
-
-    const { data: role, error: roleError } = await admin
-      .from("organization_roles")
-      .select("id")
-      .eq("organization_id", org.id)
-      .eq("is_default", true)
-      .single();
-    expect(roleError).toBeNull();
-    defaultRoleId = role!.id as string;
-
-    // Un plan SIN pagos, para el contrapeso de service_plan_services:
-    // check_service_plan_services_immutable() (Fase 22) bloquea tocar el
-    // alcance de un plan que ya tiene pagos no VOID, y el plan de
-    // `payFor` arriba tiene uno.
-    scopePlanId = await createServicePlan(owner, {
-      organizationId: org.id,
-      serviceId: secondServiceId,
-      name: "Plan sin pagos",
-    });
   });
 
   afterAll(async () => {
@@ -611,10 +592,14 @@ describe("Fase 36 -- ADR-0037: vistas públicas sólo de lectura", () => {
     expect(rosterError).toBeNull();
     expect((roster ?? []).map((m) => m.id)).toContain(staffMemberId);
 
-    // UPDATE (policy organization_members_update_owner)
+    // UPDATE (policy organization_members_update_owner). Se toca
+    // `created_by` y no `role_id` a propósito: `role_id` es una columna de
+    // la Fase 32, y este archivo tiene que pasar contra el historial
+    // commiteado, donde esa columna todavía no existe. La variante con
+    // `role_id` vive en el test de la Fase 36b.
     const { data: updated, error: updateError } = await owner.client
       .from("organization_members")
-      .update({ role_id: defaultRoleId })
+      .update({ created_by: owner.id })
       .eq("id", staffMemberId)
       .select();
     expect(updateError).toBeNull();
@@ -647,92 +632,10 @@ describe("Fase 36 -- ADR-0037: vistas públicas sólo de lectura", () => {
     expect(revoked!.cancellation_reason).toBe("REVOKED_BY_ORGANIZATION");
   });
 
-  // ================================================================
-  // 7. organization_roles (defensa en profundidad)
-  // ================================================================
-
-  it("un OWNER no puede borrar un organization_role, pero sí crearlo, leerlo y actualizarlo", async () => {
-    const { data: created, error: createError } = await owner.client
-      .from("organization_roles")
-      .insert({
-        organization_id: org.id,
-        name: `Recepción ${Math.random().toString(36).slice(2, 8)}`,
-        can_view_payments: true,
-        can_manage_payments: false,
-        can_manage_bookings: true,
-        can_manage_customers: false,
-        can_manage_attendance: true,
-        created_by: owner.id,
-      })
-      .select()
-      .single();
-    expect(createError).toBeNull();
-    const roleId = created!.id as string;
-
-    const { data: read, error: readError } = await owner.client
-      .from("organization_roles")
-      .select("id")
-      .eq("id", roleId);
-    expect(readError).toBeNull();
-    expect(read).toHaveLength(1);
-
-    const { data: updated, error: updateError } = await owner.client
-      .from("organization_roles")
-      .update({ can_manage_bookings: false })
-      .eq("id", roleId)
-      .select();
-    expect(updateError).toBeNull();
-    expect(updated).toHaveLength(1);
-
-    const { data: deleted, error: deleteError } = await owner.client
-      .from("organization_roles")
-      .delete()
-      .eq("id", roleId)
-      .select();
-    expect(deleteError).toBeNull();
-    expect(deleted ?? []).toHaveLength(0);
-    expect(await rowExists("organization_roles", { id: roleId })).toBe(true);
-  });
-
-  // ================================================================
-  // 8. service_plan_services (defensa en profundidad)
-  // ================================================================
-
-  it("un OWNER no puede borrar un service_plan_services, pero sí crearlo, leerlo y actualizarlo", async () => {
-    const { error: insertError } = await owner.client
-      .from("service_plan_services")
-      .insert({ service_plan_id: scopePlanId, service_id: thirdServiceId });
-    expect(insertError).toBeNull();
-
-    const { data: read, error: readError } = await owner.client
-      .from("service_plan_services")
-      .select("service_id")
-      .eq("service_plan_id", scopePlanId);
-    expect(readError).toBeNull();
-    expect((read ?? []).map((r) => r.service_id)).toContain(thirdServiceId);
-
-    const { data: updated, error: updateError } = await owner.client
-      .from("service_plan_services")
-      .update({ service_id: serviceId })
-      .eq("service_plan_id", scopePlanId)
-      .eq("service_id", thirdServiceId)
-      .select();
-    expect(updateError).toBeNull();
-    expect(updated).toHaveLength(1);
-
-    const { data: deleted, error: deleteError } = await owner.client
-      .from("service_plan_services")
-      .delete()
-      .eq("service_plan_id", scopePlanId)
-      .eq("service_id", serviceId)
-      .select();
-    expect(deleteError).toBeNull();
-    expect(deleted ?? []).toHaveLength(0);
-    expect(
-      await rowExists("service_plan_services", {
-        service_plan_id: scopePlanId,
-        service_id: serviceId,
-      }),
-    ).toBe(true);
-  });
+  // Las secciones 7 (`organization_roles`) y 8 (`service_plan_services`) de
+  // este archivo se movieron a
+  // `phase36b.role-and-plan-scope-delete-closed.test.ts`: su migración
+  // (`20260923240000_phase36b_...`) depende de la Fase 32, y hasta que la
+  // Fase 32 esté commiteada estos casos no pueden correr contra el
+  // historial de git. No se perdió cobertura -- cambió de archivo.
 });

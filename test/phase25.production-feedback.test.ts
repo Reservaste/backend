@@ -258,7 +258,17 @@ describe("Phase 25: feedback del primer cliente en producción", () => {
       .select("id, start_at")
       .eq("schedule_rule_id", (rule as { id: string }).id)
       .gte("start_at", new Date().toISOString())
-      .lte("start_at", `${lastOfMonth(0)}T23:59:59Z`)
+      // El techo va al día 1 del mes siguiente y NO al último día de este
+      // mes, justamente por el caso que este test existe para probar: la
+      // clase de las 21:00 del último día del mes tiene `start_at` a las
+      // 00:00 UTC del 1 del mes siguiente (ADR-0014). Con el techo en
+      // `lastOfMonth(0)T23:59:59Z` el filtro excluía la única ocurrencia que
+      // importa, y el test pasaba sólo porque todavía quedaba alguna otra
+      // fecha del mes por delante -- o sea que fallaba según la hora del día
+      // en que se corriera la suite (visto en vivo cruzando la medianoche
+      // UTC). La siguiente ocurrencia de la serie está una semana después,
+      // así que este techo captura exactamente las fechas locales del mes.
+      .lte("start_at", `${firstOfMonth(1)}T23:59:59Z`)
       .order("start_at");
 
     // Toda ocurrencia cuya fecha LOCAL cae en el mes pago tiene que dar OK,
