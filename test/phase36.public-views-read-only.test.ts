@@ -67,13 +67,16 @@ async function rowExists(table: string, filter: Record<string, string>) {
   return (count ?? 0) > 0;
 }
 
-async function organizationCount() {
-  const { count, error } = await admin
-    .from("organizations")
-    .select("*", { count: "exact", head: true });
-  expect(error).toBeNull();
-  return count ?? 0;
-}
+/**
+ * Sufijo único por corrida para los payloads que el atacante intenta
+ * insertar. Los asserts de "esto no se creó" miran la fila concreta del
+ * intento, nunca un `count(*)` global de `organizations`: vitest corre los
+ * archivos de test en paralelo (así corre CI, sin `--no-file-parallelism`)
+ * y otros archivos crean y borran organizaciones reales dentro de la misma
+ * ventana. Un conteo global comparado antes/después mide ese ruido ajeno y
+ * se pone rojo sin que nada de seguridad haya cambiado.
+ */
+const attackToken = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 describe("Fase 36 -- ADR-0037: vistas públicas sólo de lectura", () => {
   let owner: SignedInUser;
@@ -427,20 +430,26 @@ describe("Fase 36 -- ADR-0037: vistas públicas sólo de lectura", () => {
   });
 
   it("anon no puede POST organizations_public: el gate de invitación no se saltea", async () => {
-    const countBefore = await organizationCount();
+    const attackerSlug = `p36-fake-${attackToken}`;
+    const attackerName = `Organización del atacante ${attackToken}`;
 
     const { error } = await anon
       .from("organizations_public")
       .insert({
-        slug: `p36-fake-${Date.now()}`,
-        name: "Organización del atacante",
+        slug: attackerSlug,
+        name: attackerName,
         timezone: "UTC",
       })
       .select();
 
     expect(error).not.toBeNull();
     expect(error!.code).toBe("42501");
-    expect(await organizationCount()).toBe(countBefore);
+
+    // La organización que el atacante intentó crear no existe. Se mira por
+    // slug y también por nombre: si el INSERT hubiera pasado con otro slug
+    // (p. ej. reescrito por un trigger), el chequeo por nombre lo delata.
+    expect(await rowExists("organizations", { slug: attackerSlug })).toBe(false);
+    expect(await rowExists("organizations", { name: attackerName })).toBe(false);
   });
 
   it("anon no puede DELETE organizations_public", async () => {
@@ -456,18 +465,19 @@ describe("Fase 36 -- ADR-0037: vistas públicas sólo de lectura", () => {
   });
 
   it("el secuestro de slug encadenado (PATCH para liberarlo + POST para reclamarlo) falla en el primer paso", async () => {
-    const countBefore = await organizationCount();
+    const abandonedSlug = `p36-abandoned-${attackToken}`;
+    const impostorName = `Impostor ${attackToken}`;
 
     const freed = await anon
       .from("organizations_public")
-      .update({ slug: `p36-abandoned-${Date.now()}` })
+      .update({ slug: abandonedSlug })
       .eq("id", org.id)
       .select();
     expect(freed.error).not.toBeNull();
 
     const claimed = await anon
       .from("organizations_public")
-      .insert({ slug: org.slug, name: "Impostor", timezone: "UTC" })
+      .insert({ slug: org.slug, name: impostorName, timezone: "UTC" })
       .select();
     expect(claimed.error).not.toBeNull();
 
@@ -481,7 +491,12 @@ describe("Fase 36 -- ADR-0037: vistas públicas sólo de lectura", () => {
     expect(resolveError).toBeNull();
     expect(resolved!.id).toBe(org.id);
     expect(resolved!.name).toBe(org.slug);
-    expect(await organizationCount()).toBe(countBefore);
+
+    // Ninguno de los dos pasos dejó rastro: el PATCH no renombró el slug
+    // real (no hay fila con el slug "liberado") y el POST no creó al
+    // impostor.
+    expect(await rowExists("organizations", { slug: abandonedSlug })).toBe(false);
+    expect(await rowExists("organizations", { name: impostorName })).toBe(false);
   });
 
   // ================================================================
