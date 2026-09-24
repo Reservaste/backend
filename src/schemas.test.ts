@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  claimTeamInvitationSchema,
+  createOrganizationRoleSchema,
   createOrganizationSchema,
+  inviteTeamMemberSchema,
+  setMemberRoleSchema,
   organizationSlugSchema,
   signUpSchema,
   submitContactRequestSchema,
   timezoneSchema,
+  updateOrganizationRoleSchema,
 } from "./schemas";
 
 describe("organizationSlugSchema", () => {
@@ -144,5 +149,136 @@ describe("submitContactRequestSchema", () => {
       phone: "abc",
     });
     expect(result.success).toBe(false);
+  });
+});
+
+// ADR-0033
+describe("createOrganizationRoleSchema", () => {
+  it("rejects a role that charges but cannot see what it charged", () => {
+    const result = createOrganizationRoleSchema.safeParse({
+      name: "Profesor",
+      canViewPayments: false,
+      canManagePayments: true,
+      canManageBookings: true,
+      canManageCustomers: true,
+      canManageAttendance: true,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts the role the user actually asked for: a teacher with no payments", () => {
+    const result = createOrganizationRoleSchema.safeParse({
+      name: "Profesor",
+      canViewPayments: false,
+      canManagePayments: false,
+      canManageBookings: true,
+      canManageCustomers: true,
+      canManageAttendance: true,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("defaults to the current STAFF behaviour when nothing is said", () => {
+    const result = createOrganizationRoleSchema.safeParse({ name: "Equipo" });
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({
+      canViewPayments: true,
+      canManagePayments: true,
+      canManageBookings: true,
+      canManageCustomers: true,
+      canManageAttendance: true,
+    });
+  });
+
+  it("rejects a blank name", () => {
+    expect(createOrganizationRoleSchema.safeParse({ name: "   " }).success).toBe(false);
+  });
+});
+
+describe("updateOrganizationRoleSchema", () => {
+  it("rejects turning MANAGE on while turning VIEW off in the same edit", () => {
+    const result = updateOrganizationRoleSchema.safeParse({
+      roleId: "11111111-1111-4111-8111-111111111111",
+      canManagePayments: true,
+      canViewPayments: false,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("allows a partial edit that says nothing about payments", () => {
+    const result = updateOrganizationRoleSchema.safeParse({
+      roleId: "11111111-1111-4111-8111-111111111111",
+      name: "Recepción",
+    });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("setMemberRoleSchema", () => {
+  it("accepts null as 'back to the default role'", () => {
+    const result = setMemberRoleSchema.safeParse({
+      memberId: "11111111-1111-4111-8111-111111111111",
+      roleId: null,
+    });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("inviteTeamMemberSchema (ADR-0034)", () => {
+  const organizationId = "11111111-1111-4111-8111-111111111111";
+
+  it("normalizes the email to lowercase, so the border and the base agree on which invitation is 'the same'", () => {
+    const result = inviteTeamMemberSchema.safeParse({
+      organizationId,
+      email: "  Profe@Example.COM ",
+      displayName: "Juan Pérez",
+    });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.email).toBe("profe@example.com");
+  });
+
+  it("accepts an invitation with no phone: the channel is optional, the email is not", () => {
+    expect(
+      inviteTeamMemberSchema.safeParse({ organizationId, email: "profe@example.com" }).success,
+    ).toBe(true);
+    expect(inviteTeamMemberSchema.safeParse({ organizationId }).success).toBe(false);
+  });
+
+  it("accepts roleId null as 'the organization's default role'", () => {
+    const result = inviteTeamMemberSchema.safeParse({
+      organizationId,
+      email: "profe@example.com",
+      roleId: null,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a malformed email and a malformed phone", () => {
+    expect(
+      inviteTeamMemberSchema.safeParse({ organizationId, email: "no-arroba" }).success,
+    ).toBe(false);
+    expect(
+      inviteTeamMemberSchema.safeParse({
+        organizationId,
+        email: "profe@example.com",
+        phone: "cero-nueve-nueve",
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("claimTeamInvitationSchema (ADR-0034)", () => {
+  it("accepts a 43-character base64url token (32 bytes, no padding)", () => {
+    const token = "a".repeat(40) + "_-Z";
+    expect(claimTeamInvitationSchema.safeParse({ token }).success).toBe(true);
+  });
+
+  it("rejects anything that cannot be one of our tokens", () => {
+    expect(claimTeamInvitationSchema.safeParse({ token: "short" }).success).toBe(false);
+    // '+' and '/' are base64, not base64url: our tokens never contain them.
+    expect(
+      claimTeamInvitationSchema.safeParse({ token: "a".repeat(42) + "+" }).success,
+    ).toBe(false);
+    expect(claimTeamInvitationSchema.safeParse({ token: "" }).success).toBe(false);
   });
 });

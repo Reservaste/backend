@@ -18,11 +18,28 @@ const PASSWORD = "cross-tenant-test-password-123";
 
 export interface SignedInUser {
   id: string;
+  /**
+   * The address this session authenticates as. Exposed because ADR-0034's
+   * team invitation canje compares the session's email with the invited
+   * one, so a test has to be able to talk about it.
+   */
+  email: string;
   client: SupabaseClient;
 }
 
-export async function createSignedInUser(emailPrefix: string): Promise<SignedInUser> {
-  const email = `${emailPrefix}-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
+/**
+ * `explicitEmail` exists for the ADR-0034 flow: the point of a team
+ * invitation is that it is issued to an address that has no account yet, so
+ * a test needs to invite first and create the account with that exact
+ * address afterwards.
+ */
+export async function createSignedInUser(
+  emailPrefix: string,
+  explicitEmail?: string,
+): Promise<SignedInUser> {
+  const email =
+    explicitEmail ??
+    `${emailPrefix}-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
   const { data, error } = await admin.auth.admin.createUser({
     email,
     password: PASSWORD,
@@ -38,7 +55,7 @@ export async function createSignedInUser(emailPrefix: string): Promise<SignedInU
     throw new Error(`failed to sign in test user ${email}: ${signInError.message}`);
   }
 
-  return { id: data.user.id, client };
+  return { id: data.user.id, email, client };
 }
 
 /**
