@@ -94,19 +94,26 @@ const dropInPlanSchema = z.object({
   billingType: z.literal("ONE_TIME").default("ONE_TIME"),
 });
 
+// ADR-0031: the two long cycles join the two monthly ones. They are
+// generalizations, not replacements -- a plan that does not name a cycle
+// still gets CALENDAR_MONTH, which is what every existing plan is.
+const billingCycleSchema = z
+  .enum(["CALENDAR_MONTH", "ROLLING_MONTH", "CALENDAR_PERIOD", "ROLLING_PERIOD"])
+  .default("CALENDAR_MONTH");
+
 const weeklyQuotaPlanSchema = z.object({
   planKind: z.literal("WEEKLY_QUOTA"),
   // No upper bound on purpose: a service can have two rules on the same
   // weekday, so "<= 7" would be wrong.
   weeklyQuota: z.coerce.number().int().positive("La frecuencia debe ser al menos 1"),
   billingType: z.literal("MONTHLY").default("MONTHLY"),
-  billingCycle: z.enum(["CALENDAR_MONTH", "ROLLING_MONTH"]).default("CALENDAR_MONTH"),
+  billingCycle: billingCycleSchema,
 });
 
 const unlimitedPlanSchema = z.object({
   planKind: z.literal("UNLIMITED"),
   billingType: z.literal("MONTHLY").default("MONTHLY"),
-  billingCycle: z.enum(["CALENDAR_MONTH", "ROLLING_MONTH"]).default("CALENDAR_MONTH"),
+  billingCycle: billingCycleSchema,
 });
 
 // ADR-0029: a plan covers one, several, or all of the organization's
@@ -129,6 +136,23 @@ export const createServicePlanSchema = z
     // WEEKLY_QUOTA"; this only adds the finer "iff more than one service"
     // half so the form can require it exactly when it is shown.
     quotaScope: z.enum(["PER_SERVICE", "SHARED_ACROSS_SERVICES"]).optional(),
+    // ADR-0031. Read only for the two long cycles; the server action drops
+    // them otherwise. The real defence is in the database (the biconditional
+    // with billing_cycle, the 1..12 range and "divides 12" for a calendar
+    // cycle), same as everything else in this schema -- here it only keeps a
+    // typo from reaching the table and produces a readable message.
+    billingPeriodMonths: z.coerce
+      .number()
+      .int()
+      .min(1, "El ciclo tiene que ser de al menos 1 mes")
+      .max(12, "El ciclo no puede pasar de 12 meses")
+      .optional(),
+    billingAnchorMonth: z.coerce
+      .number()
+      .int()
+      .min(1, "Mes de inicio inválido")
+      .max(12, "Mes de inicio inválido")
+      .optional(),
   })
   .and(
     z.discriminatedUnion("planKind", [
@@ -220,3 +244,138 @@ export const submitContactRequestSchema = z.object({
 });
 
 export type SubmitContactRequestInput = z.infer<typeof submitContactRequestSchema>;
+
+// ============================================================
+// ADR-0033 -- roles configurables por organización
+// ============================================================
+// Los límites espejan los CHECK de organization_roles en la Fase 32, para
+// que un rechazo acá y uno en la base signifiquen lo mismo. La regla
+// "MANAGE_PAYMENTS implica VIEW_PAYMENTS" está en los tres lugares donde
+// puede aplicarse (schema, RPC y CHECK de tabla) a propósito: la base es la
+// que manda, esto es lo que hace que el formulario lo explique en vez de
+// devolver un error de constraint.
+
+export const organizationRoleNameSchema = z
+  .string()
+  .trim()
+  .min(1, "El nombre del rol es obligatorio")
+  .max(60, "El nombre del rol no puede tener más de 60 caracteres");
+
+export const organizationRolePermissionsSchema = z
+  .object({
+    canViewPayments: z.boolean(),
+    canManagePayments: z.boolean(),
+    canManageBookings: z.boolean(),
+    canManageCustomers: z.boolean(),
+    canManageAttendance: z.boolean(),
+  })
+  .refine((p) => !p.canManagePayments || p.canViewPayments, {
+    message: "Un rol que registra pagos tiene que poder verlos",
+    path: ["canViewPayments"],
+  });
+
+export const createOrganizationRoleSchema = z
+  .object({
+    name: organizationRoleNameSchema,
+    canViewPayments: z.boolean().default(true),
+    canManagePayments: z.boolean().default(true),
+    canManageBookings: z.boolean().default(true),
+    canManageCustomers: z.boolean().default(true),
+    canManageAttendance: z.boolean().default(true),
+  })
+  .refine((p) => !p.canManagePayments || p.canViewPayments, {
+    message: "Un rol que registra pagos tiene que poder verlos",
+    path: ["canViewPayments"],
+  });
+
+export type CreateOrganizationRoleInput = z.infer<typeof createOrganizationRoleSchema>;
+
+export const updateOrganizationRoleSchema = z
+  .object({
+    roleId: z.string().uuid(),
+    name: organizationRoleNameSchema.optional(),
+    canViewPayments: z.boolean().optional(),
+    canManagePayments: z.boolean().optional(),
+    canManageBookings: z.boolean().optional(),
+    canManageCustomers: z.boolean().optional(),
+    canManageAttendance: z.boolean().optional(),
+    isActive: z.boolean().optional(),
+  })
+  .refine((p) => !(p.canManagePayments === true && p.canViewPayments === false), {
+    message: "Un rol que registra pagos tiene que poder verlos",
+    path: ["canViewPayments"],
+  });
+
+export type UpdateOrganizationRoleInput = z.infer<typeof updateOrganizationRoleSchema>;
+
+export const setMemberRoleSchema = z.object({
+  memberId: z.string().uuid(),
+  /** Null = vuelve al rol por defecto de la organización. */
+  roleId: z.string().uuid().nullable(),
+});
+
+export type SetMemberRoleInput = z.infer<typeof setMemberRoleSchema>;
+
+// ============================================================
+// ADR-0034 -- invitaciones de equipo (alta sin registro previo)
+// ============================================================
+// Los límites espejan los CHECK de team_invitations en la Fase 33. El email
+// se normaliza acá igual que en la RPC (lower + trim) para que el borde y la
+// base no puedan discrepar sobre qué invitación es "la misma": la unicidad de
+// "un link vivo" es por (organización, email) normalizado.
+//
+// El teléfono es opcional a propósito: sirve para armar el link de WhatsApp,
+// pero el vínculo que el canje exige es el email. Una invitación sin teléfono
+// es válida -- el link se copia y se pega.
+
+export const teamInvitationEmailSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .max(320)
+  .email("Email inválido");
+
+/**
+ * E.164 con `+` obligatorio, el mismo formato que el CHECK
+ * `team_invitations_phone_e164`. La RPC normaliza (saca espacios, paréntesis y
+ * guiones, y agrega el `+` si falta) antes de validar, así que un formulario
+ * puede ser más permisivo que esto; este schema es el contrato del server
+ * action, no el del campo de texto.
+ */
+export const teamInvitationPhoneSchema = z
+  .string()
+  .trim()
+  .regex(/^\+?[0-9 ()-]{6,20}$/, "Formato de teléfono inválido");
+
+export const inviteTeamMemberSchema = z.object({
+  organizationId: z.string().uuid(),
+  email: teamInvitationEmailSchema,
+  /** El nombre con el que el dueño da de alta a la persona. */
+  displayName: z.string().trim().min(1, "El nombre es obligatorio").max(120).optional(),
+  phone: teamInvitationPhoneSchema.optional(),
+  /** Null/ausente = el rol por defecto de la organización. */
+  roleId: z.string().uuid().nullable().optional(),
+});
+
+export type InviteTeamMemberInput = z.infer<typeof inviteTeamMemberSchema>;
+
+export const revokeTeamInvitationSchema = z.object({
+  invitationId: z.string().uuid(),
+});
+
+export type RevokeTeamInvitationInput = z.infer<typeof revokeTeamInvitationSchema>;
+
+/**
+ * El token es 32 bytes en base64url sin padding: 43 caracteres de
+ * `[A-Za-z0-9_-]`. Validar la forma en el borde evita ir a la base por algo
+ * que no puede ser un token nuestro -- pero el veredicto real (existe, no
+ * vencido, no canjeado) sólo lo da `claim_team_invitation()`.
+ */
+export const claimTeamInvitationSchema = z.object({
+  token: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9_-]{43}$/, "Link de invitación inválido"),
+});
+
+export type ClaimTeamInvitationInput = z.infer<typeof claimTeamInvitationSchema>;

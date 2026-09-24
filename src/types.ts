@@ -38,6 +38,12 @@ export interface OrganizationMember {
   organizationId: string;
   profileId: string;
   role: OrganizationMemberRole;
+  /**
+   * ADR-0033: rol configurable del miembro dentro de `STAFF`. Null = el rol
+   * `isDefault` de la organización (no "sin permisos"). Siempre null para un
+   * `OWNER`, que corta antes de mirar cualquier permiso.
+   */
+  roleId: string | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -45,6 +51,131 @@ export interface OrganizationMember {
   cancelledAt: string | null;
   cancelledBy: string | null;
   cancellationReason: MemberCancellationReason | null;
+}
+
+/**
+ * ADR-0033: los cinco permisos configurables del primer corte. El conjunto es
+ * cerrado a propósito -- lo que no está acá no es configurable y sigue siendo
+ * de todo miembro activo (ver el calendario, la agenda, el padrón, los
+ * horarios) o ya es OWNER-only (configuración, branding, invitar equipo,
+ * administrar roles, planes y precios, créditos manuales).
+ *
+ * `MANAGE_PAYMENTS` implica `VIEW_PAYMENTS`: cobrar sin poder ver lo cobrado
+ * no es un rol, es un bug (hay un CHECK en la base que lo garantiza).
+ */
+export type OrgPermission =
+  | "VIEW_PAYMENTS"
+  | "MANAGE_PAYMENTS"
+  | "MANAGE_BOOKINGS"
+  | "MANAGE_CUSTOMERS"
+  | "MANAGE_ATTENDANCE";
+
+/** Los permisos de un miembro, ya resueltos (rol propio o rol por defecto). */
+export interface OrganizationPermissions {
+  canViewPayments: boolean;
+  canManagePayments: boolean;
+  canManageBookings: boolean;
+  canManageCustomers: boolean;
+  canManageAttendance: boolean;
+}
+
+/**
+ * ADR-0033: rol configurable por organización, con nombre libre elegido por
+ * ella ("Profesor", "Recepción"). Los permisos son columnas booleanas y no un
+ * `jsonb`, para que no exista el estado "la clave no está" -- ver ADR-0033
+ * §4.2 y el bypass de autorización de ADR-0026/ADR-0028.
+ */
+export interface OrganizationRole extends OrganizationPermissions {
+  id: string;
+  organizationId: string;
+  name: string;
+  /** El rol que recibe un `STAFF` sin `roleId`. Exactamente uno por organización. */
+  isDefault: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string | null;
+}
+
+/** Fila de `my_organization_permissions()`: el rol efectivo + sus permisos. */
+export interface MyOrganizationPermissions extends OrganizationPermissions {
+  role: OrganizationMemberRole;
+  /** Null para un `OWNER`: no tiene rol configurable. */
+  roleId: string | null;
+  roleName: string | null;
+}
+
+/** Fila de `organization_team()`: el miembro con su rol EFECTIVO. */
+export interface OrganizationTeamMember {
+  memberId: string;
+  profileId: string;
+  fullName: string;
+  role: OrganizationMemberRole;
+  isActive: boolean;
+  /** Rol efectivo (el asignado, o el por defecto). Null para un `OWNER`. */
+  roleId: string | null;
+  roleName: string | null;
+}
+
+/**
+ * ADR-0034: estado derivado de una invitación de equipo. No es una columna —
+ * se calcula en `organization_team_invitations()` a partir de
+ * `redeemedAt`/`revokedAt`/`expiresAt`, en ese orden de precedencia. Una
+ * invitación vencida sigue siendo "pendiente" en el sentido de que nadie la
+ * usó: es justo la que hay que reenviar.
+ */
+export type TeamInvitationStatus = "PENDING" | "REDEEMED" | "REVOKED" | "EXPIRED";
+
+/**
+ * ADR-0034: invitación de equipo con link de un solo uso y 24 h de vida, para
+ * dar de alta a alguien que todavía no tiene cuenta en la plataforma.
+ *
+ * Mecanismo separado de la activación de clientes (ADR-0026): lo que otorga
+ * este token es acceso a los datos de terceros de todo el tenant, no "sos vos
+ * mismo". Nunca puede crear un `OWNER` (hay un CHECK en la base), el canje
+ * exige que el email de la sesión coincida, y no lleva `tokenHash`: el hash
+ * nunca sale de la base y el token claro existe una sola vez, en el retorno de
+ * la RPC de emisión.
+ */
+export interface TeamInvitation {
+  id: string;
+  organizationId: string;
+  /** Normalizado a minúsculas. Es el vínculo que el canje exige, no el canal. */
+  email: string;
+  /** E.164 con `+`. Sólo canal de envío (el link de WhatsApp). */
+  phone: string | null;
+  /** El nombre con el que el dueño dio de alta a la persona. No es identidad. */
+  displayName: string | null;
+  /** Siempre `"STAFF"`: una invitación nunca crea un `OWNER` (ADR-0034 resolución 5). */
+  role: Extract<OrganizationMemberRole, "STAFF">;
+  /** Rol configurable elegido al invitar. Null = el rol por defecto de la organización. */
+  roleId: string | null;
+  expiresAt: string;
+  createdAt: string;
+  createdBy: string;
+  redeemedAt: string | null;
+  redeemedProfileId: string | null;
+  revokedAt: string | null;
+  revokedBy: string | null;
+}
+
+/** Fila de `organization_team_invitations()`: la invitación + su estado derivado. */
+export interface OrganizationTeamInvitation {
+  invitationId: string;
+  email: string;
+  displayName: string | null;
+  phone: string | null;
+  /** Rol elegido al invitar; null significa "el por defecto". */
+  roleId: string | null;
+  /** Nombre del rol EFECTIVO (el elegido, o el por defecto de la organización). */
+  roleName: string | null;
+  status: TeamInvitationStatus;
+  createdAt: string;
+  expiresAt: string;
+  redeemedAt: string | null;
+  redeemedProfileId: string | null;
+  revokedAt: string | null;
+  createdBy: string;
 }
 
 export interface Profile {
@@ -109,7 +240,18 @@ export interface Resource {
 export type ServiceCancellationReason = "DISCONTINUED_BY_ORGANIZATION";
 
 export type BillingType = "FREE" | "ONE_TIME" | "MONTHLY";
-export type BillingCycle = "CALENDAR_MONTH" | "ROLLING_MONTH";
+/**
+ * ADR-0031: `CALENDAR_PERIOD` and `ROLLING_PERIOD` are the generalizations
+ * of the two monthly cycles over `ServicePlan.billingPeriodMonths` (a
+ * quarter, a year). `CALENDAR_MONTH`/`ROLLING_MONTH` are neither removed
+ * nor deprecated -- they are the `billingPeriodMonths = 1` case and the
+ * whole of the existing data.
+ */
+export type BillingCycle =
+  | "CALENDAR_MONTH"
+  | "ROLLING_MONTH"
+  | "CALENDAR_PERIOD"
+  | "ROLLING_PERIOD";
 
 export interface Service {
   id: string;
@@ -397,6 +539,21 @@ export interface ServicePlan {
   billingType: BillingType;
   billingCycle: BillingCycle | null;
   /**
+   * ADR-0031: how many months one billing period spans. `null` means 1 --
+   * the behaviour every plan had before this ADR. Non-null exactly for the
+   * `CALENDAR_PERIOD`/`ROLLING_PERIOD` cycles (the database enforces the
+   * biconditional). Immutable once the plan has non-VOID payments.
+   */
+  billingPeriodMonths: number | null;
+  /**
+   * ADR-0031: the month (1-12) a long calendar cycle starts on -- 1 with a
+   * quarterly period means Jan-Mar, Apr-Jun, Jul-Sep, Oct-Dec, the same for
+   * every customer of the plan. `null` means the cycle starts on the month
+   * of the purchase, and then there is never anything to prorate. Only for
+   * `CALENDAR_PERIOD`.
+   */
+  billingAnchorMonth: number | null;
+  /**
    * false means "no longer offered". It never invalidates a payment
    * already made (ADR-0024 §6.d).
    */
@@ -407,6 +564,33 @@ export interface ServicePlan {
   createdBy: string | null;
   cancelledAt: string | null;
   cancelledBy: string | null;
+}
+
+/**
+ * ADR-0031: what `quote_service_plan_period(planId, from)` answers -- the
+ * full period a payment made on `from` buys, and the amount the counter is
+ * *suggested* to charge for it.
+ *
+ * It is a quote, never a charge: `Payment.amount` stays free (ADR-0024
+ * resolution 5) and nothing in the database applies the proration on its
+ * own. The period is never trimmed to the sign-up date; what gets prorated
+ * is the price, by whole months, counting the sign-up month as complete,
+ * and only when entering a long *calendar* cycle mid-way (a rolling cycle
+ * starts on the day of the purchase, so it has nothing to prorate).
+ */
+export interface ServicePlanQuote {
+  /** Full period, never trimmed to the sign-up date. */
+  periodStart: string;
+  periodEnd: string;
+  /** `ServicePlan.price`, as listed. */
+  fullPrice: number;
+  /** Suggested amount: never above `fullPrice`, never below 0. */
+  proratedPrice: number;
+  /** True when `proratedPrice` differs from `fullPrice`. */
+  prorated: boolean;
+  /** Months charged / months in the whole period ("1 de 3"). */
+  unitsCharged: number;
+  unitsTotal: number;
 }
 
 // ---------------------------------------------------------------
@@ -536,4 +720,52 @@ export interface ServiceEntitlement {
   cancelledAt: string | null;
   cancelledBy: string | null;
   cancellationReason: EntitlementCancellationReason | null;
+}
+
+// ---------------------------------------------------------------
+// Phase 30: audit log (ADR-0032)
+// ---------------------------------------------------------------
+
+/**
+ * The eight sensitive facts the platform records. Deliberately closed:
+ * attendance, make-up credits (which are their own log in
+ * `makeup_credits`), customer-side actions, logins and reads are out of
+ * scope -- adding one is a migration plus a value here, never a free text.
+ */
+export type AuditAction =
+  | "PAYMENT_CREATED"
+  /** Includes voiding (VOID). `metadata.status` carries from/to. */
+  | "PAYMENT_STATUS_CHANGED"
+  /** Booked by the counter on a customer's behalf, never by the customer themself. */
+  | "BOOKING_CREATED_BY_STAFF"
+  | "BOOKING_CANCELLED_BY_STAFF"
+  | "SERVICE_PLAN_CREATED"
+  /** Price, name or ordering. `metadata` carries only what changed. */
+  | "SERVICE_PLAN_UPDATED"
+  /** And its inverse: `metadata.is_active` carries from/to. */
+  | "SERVICE_PLAN_DEACTIVATED"
+  | "ORGANIZATION_SUBSCRIPTION_CHANGED";
+
+/**
+ * One row of `organization_audit_log()` -- the read the OWNER's screen
+ * consumes. Not the raw table: the actor of a platform-side action is
+ * masked here (ADR-0032 resolution 2), so `actorId`/`actorName` are null
+ * and `actorIsPlatform` is true for those rows.
+ *
+ * `metadata` is the minimal diff the trigger wrote (never the whole row,
+ * never personal data), so it is intentionally untyped per action.
+ */
+export interface AuditLogEntry {
+  id: string;
+  action: AuditAction;
+  /** Which table the fact is about. No FK: the log outlives what it audits. */
+  targetTable: string;
+  targetId: string;
+  /** Null for a system action (job/cron) and for a platform actor seen by the OWNER. */
+  actorId: string | null;
+  actorName: string | null;
+  /** True when the actor is not a member of this organization (i.e. the platform). */
+  actorIsPlatform: boolean;
+  metadata: Record<string, unknown>;
+  createdAt: string;
 }

@@ -7,8 +7,13 @@ import type {
   Customer,
   MakeupCredit,
   MyMakeupCreditRow,
+  MyOrganizationPermissions,
   Organization,
   OrganizationMember,
+  OrganizationMemberRole,
+  OrganizationRole,
+  OrganizationTeamInvitation,
+  OrganizationTeamMember,
   Payment,
   Profile,
   PublicAvailabilitySlot,
@@ -22,6 +27,8 @@ import type {
   ServiceEntitlement,
   ServicePlan,
   SlotOccurrence,
+  TeamInvitation,
+  TeamInvitationStatus,
 } from "./types";
 
 export interface OrganizationRow {
@@ -68,6 +75,8 @@ export interface OrganizationMemberRow {
   organization_id: string;
   profile_id: string;
   role: string;
+  /** ADR-0033. Opcional acá porque muchos `select` viejos no la piden. */
+  role_id?: string | null;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -83,6 +92,10 @@ export function mapOrganizationMember(row: OrganizationMemberRow): OrganizationM
     organizationId: row.organization_id,
     profileId: row.profile_id,
     role: row.role as OrganizationMember["role"],
+    // Null = el rol por defecto de la organización (ADR-0033), que no es lo
+    // mismo que "sin permisos": nunca se decide un permiso leyendo esto, se
+    // decide con my_organization_permissions() / has_org_permission().
+    roleId: row.role_id ?? null,
     isActive: row.is_active,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -465,6 +478,9 @@ export interface ServicePlanRow {
   quota_scope: string | null;
   billing_type: string;
   billing_cycle: string | null;
+  /** ADR-0031. Absent on rows selected before this column existed. */
+  billing_period_months?: number | null;
+  billing_anchor_month?: number | null;
   is_active: boolean;
   sort_order: number;
   created_at: string;
@@ -496,6 +512,12 @@ export function mapServicePlan(row: ServicePlanRow, serviceIds: string[]): Servi
     quotaScope: (row.quota_scope ?? null) as ServicePlan["quotaScope"],
     billingType: row.billing_type as ServicePlan["billingType"],
     billingCycle: (row.billing_cycle ?? null) as ServicePlan["billingCycle"],
+    // ADR-0031: null and 1 mean the same thing in the database (null is the
+    // only legal value for a monthly cycle), and the mapper keeps that
+    // distinction instead of normalizing to 1 -- "this plan declares a long
+    // period" and "this plan is monthly" are different facts on screen.
+    billingPeriodMonths: row.billing_period_months ?? null,
+    billingAnchorMonth: row.billing_anchor_month ?? null,
     isActive: row.is_active,
     sortOrder: row.sort_order,
     createdAt: row.created_at,
@@ -667,5 +689,177 @@ export function mapMyMakeupCreditRow(row: MyMakeupCreditRowInput): MyMakeupCredi
     isExpired: row.is_expired,
     sourceStartAt: row.source_start_at ?? null,
     note: row.note ?? null,
+  };
+}
+
+// ============================================================
+// ADR-0033 -- roles configurables por organización
+// ============================================================
+
+export interface OrganizationRoleRow {
+  id: string;
+  organization_id: string;
+  name: string;
+  is_default: boolean;
+  is_active: boolean;
+  can_view_payments: boolean;
+  can_manage_payments: boolean;
+  can_manage_bookings: boolean;
+  can_manage_customers: boolean;
+  can_manage_attendance: boolean;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+}
+
+export function mapOrganizationRole(row: OrganizationRoleRow): OrganizationRole {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    name: row.name,
+    isDefault: row.is_default,
+    isActive: row.is_active,
+    canViewPayments: row.can_view_payments,
+    canManagePayments: row.can_manage_payments,
+    canManageBookings: row.can_manage_bookings,
+    canManageCustomers: row.can_manage_customers,
+    canManageAttendance: row.can_manage_attendance,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    createdBy: row.created_by,
+  };
+}
+
+/** Fila de `my_organization_permissions()`. */
+export interface MyOrganizationPermissionsRow {
+  role: string;
+  role_id: string | null;
+  role_name: string | null;
+  can_view_payments: boolean;
+  can_manage_payments: boolean;
+  can_manage_bookings: boolean;
+  can_manage_customers: boolean;
+  can_manage_attendance: boolean;
+}
+
+export function mapMyOrganizationPermissions(
+  row: MyOrganizationPermissionsRow,
+): MyOrganizationPermissions {
+  return {
+    role: row.role as OrganizationMemberRole,
+    roleId: row.role_id,
+    roleName: row.role_name,
+    canViewPayments: row.can_view_payments,
+    canManagePayments: row.can_manage_payments,
+    canManageBookings: row.can_manage_bookings,
+    canManageCustomers: row.can_manage_customers,
+    canManageAttendance: row.can_manage_attendance,
+  };
+}
+
+/** Fila de `organization_team()` (ADR-0033: con el rol efectivo). */
+export interface OrganizationTeamMemberRow {
+  member_id: string;
+  profile_id: string;
+  full_name: string;
+  role: string;
+  is_active: boolean;
+  role_id: string | null;
+  role_name: string | null;
+}
+
+export function mapOrganizationTeamMember(
+  row: OrganizationTeamMemberRow,
+): OrganizationTeamMember {
+  return {
+    memberId: row.member_id,
+    profileId: row.profile_id,
+    fullName: row.full_name,
+    role: row.role as OrganizationMemberRole,
+    isActive: row.is_active,
+    roleId: row.role_id,
+    roleName: row.role_name,
+  };
+}
+
+// ============================================================
+// ADR-0034 -- invitaciones de equipo
+// ============================================================
+// Ninguna de las dos filas trae `token_hash`: no está en el `returns table`
+// de `organization_team_invitations()` y la tabla no tiene `grant select`
+// para nadie. Si alguna vez apareciera acá, sería un bug de la RPC, no de
+// este mapper.
+
+export interface TeamInvitationRow {
+  id: string;
+  organization_id: string;
+  email: string;
+  phone: string | null;
+  display_name: string | null;
+  role: string;
+  role_id: string | null;
+  expires_at: string;
+  created_at: string;
+  created_by: string;
+  redeemed_at: string | null;
+  redeemed_profile_id: string | null;
+  revoked_at: string | null;
+  revoked_by: string | null;
+}
+
+export function mapTeamInvitation(row: TeamInvitationRow): TeamInvitation {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    email: row.email,
+    phone: row.phone,
+    displayName: row.display_name,
+    // El CHECK team_invitations_never_owner garantiza que esto es 'STAFF'.
+    role: "STAFF",
+    roleId: row.role_id,
+    expiresAt: row.expires_at,
+    createdAt: row.created_at,
+    createdBy: row.created_by,
+    redeemedAt: row.redeemed_at,
+    redeemedProfileId: row.redeemed_profile_id,
+    revokedAt: row.revoked_at,
+    revokedBy: row.revoked_by,
+  };
+}
+
+/** Fila de `organization_team_invitations()`. */
+export interface OrganizationTeamInvitationRow {
+  invitation_id: string;
+  email: string;
+  display_name: string | null;
+  phone: string | null;
+  role_id: string | null;
+  role_name: string | null;
+  status: string;
+  created_at: string;
+  expires_at: string;
+  redeemed_at: string | null;
+  redeemed_profile_id: string | null;
+  revoked_at: string | null;
+  created_by: string;
+}
+
+export function mapOrganizationTeamInvitation(
+  row: OrganizationTeamInvitationRow,
+): OrganizationTeamInvitation {
+  return {
+    invitationId: row.invitation_id,
+    email: row.email,
+    displayName: row.display_name,
+    phone: row.phone,
+    roleId: row.role_id,
+    roleName: row.role_name,
+    status: row.status as TeamInvitationStatus,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    redeemedAt: row.redeemed_at,
+    redeemedProfileId: row.redeemed_profile_id,
+    revokedAt: row.revoked_at,
+    createdBy: row.created_by,
   };
 }

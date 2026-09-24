@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { isActiveCustomer, isActiveMember, isEntitlementCurrentlyValid, isOwner, isStaffOrOwner } from "./invariants";
+import {
+  ALL_ORG_PERMISSIONS,
+  hasOrgPermission,
+  isActiveCustomer,
+  isActiveMember,
+  isEntitlementCurrentlyValid,
+  isOwner,
+  isStaffOrOwner,
+  NO_ORG_PERMISSIONS,
+  ORG_PERMISSION_KEYS,
+} from "./invariants";
 
 describe("isOwner", () => {
   it("is true for an active OWNER", () => {
@@ -107,5 +117,45 @@ describe("isEntitlementCurrentlyValid", () => {
         ),
       ).toBe(false);
     });
+  });
+});
+
+// ADR-0033 -- permisos configurables dentro de STAFF
+describe("hasOrgPermission", () => {
+  const profesor = {
+    canViewPayments: false,
+    canManagePayments: false,
+    canManageBookings: true,
+    canManageCustomers: true,
+    canManageAttendance: true,
+  };
+
+  it("reads each permission through its enum key", () => {
+    expect(hasOrgPermission(profesor, "VIEW_PAYMENTS")).toBe(false);
+    expect(hasOrgPermission(profesor, "MANAGE_PAYMENTS")).toBe(false);
+    expect(hasOrgPermission(profesor, "MANAGE_BOOKINGS")).toBe(true);
+    expect(hasOrgPermission(profesor, "MANAGE_CUSTOMERS")).toBe(true);
+    expect(hasOrgPermission(profesor, "MANAGE_ATTENDANCE")).toBe(true);
+  });
+
+  it("an OWNER can everything, same as has_org_permission() cutting before the role", () => {
+    expect(hasOrgPermission(ALL_ORG_PERMISSIONS, "VIEW_PAYMENTS")).toBe(true);
+    expect(hasOrgPermission(ALL_ORG_PERMISSIONS, "MANAGE_PAYMENTS")).toBe(true);
+  });
+
+  it("fails closed when nothing could be resolved", () => {
+    for (const key of Object.keys(ORG_PERMISSION_KEYS) as Array<keyof typeof ORG_PERMISSION_KEYS>) {
+      expect(hasOrgPermission(NO_ORG_PERMISSIONS, key)).toBe(false);
+    }
+  });
+
+  it("covers every permission of the enum, so a new one cannot be forgotten here", () => {
+    expect(Object.keys(ORG_PERMISSION_KEYS).sort()).toEqual([
+      "MANAGE_ATTENDANCE",
+      "MANAGE_BOOKINGS",
+      "MANAGE_CUSTOMERS",
+      "MANAGE_PAYMENTS",
+      "VIEW_PAYMENTS",
+    ]);
   });
 });
