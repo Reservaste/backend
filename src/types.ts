@@ -767,5 +767,24 @@ export interface AuditLogEntry {
   /** True when the actor is not a member of this organization (i.e. the platform). */
   actorIsPlatform: boolean;
   metadata: Record<string, unknown>;
+  /**
+   * ISO timestamp exactly as the RPC returned it (microsecond precision).
+   * Also half of the pagination cursor (`AuditLogCursor`) -- never round-trip
+   * it through `Date` for that purpose: truncating to milliseconds moves the
+   * cursor before the real row and silently skips rows.
+   */
   createdAt: string;
+}
+
+/**
+ * Keyset cursor for `organization_audit_log()` (Phase 30b): the
+ * `(createdAt, id)` of the LAST entry of the previous page, both verbatim.
+ * Both halves are required -- `createdAt` alone is ambiguous, because one
+ * transaction (e.g. cancelling an occurrence with N bookings) writes N rows
+ * with the identical timestamp; the RPC rejects a half cursor with
+ * INVALID_CURSOR.
+ */
+export interface AuditLogCursor {
+  beforeCreatedAt: string;
+  beforeId: string;
 }
