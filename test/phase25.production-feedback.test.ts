@@ -805,6 +805,21 @@ describe("Phase 25: feedback del primer cliente en producción", () => {
     const f = await setupPaidService("p25-anyslot", { makeupCredits: true });
     createdUserIds.push(f.owner.id);
 
+    // El crédito se libera en un día de la semana y se usa en otro
+    // distinto -- literalmente el pedido del cliente -- así que no puede
+    // depender de que ambos caigan dentro del mismo mes calendario. La
+    // política por defecto de la organización es END_OF_MONTH, calculada
+    // desde la fecha del turno que lo emite: cerca de fin de mes eso vence
+    // el crédito antes de que el otro turno (que puede caer en el mes
+    // siguiente) llegue -- ver .claude/knowledge/curation-inbox.md
+    // (2026-09-28). END_OF_MONTH ya se prueba en
+    // phase31.long-billing-periods.test.ts, así que desacoplar este test
+    // de esa política no pierde cobertura.
+    await f.owner.client
+      .from("services")
+      .update({ makeup_credit_expiry_override: "DAYS_AFTER", makeup_credit_expiry_days_override: 30 })
+      .eq("id", f.service.id);
+
     // Dos días de semana distintos: el crédito nace en uno y se usa en el
     // otro, que es literalmente el pedido del cliente.
     const ruleMon = await createRule(f, 2);

@@ -22,6 +22,28 @@ function isoDate(offsetDays: number) {
   return d.toISOString().slice(0, 10);
 }
 
+/**
+ * A weekday whose next occurrence is guaranteed to land within the current
+ * calendar month. A hardcoded Monday broke every month on its own last
+ * Monday: `customer_billing_horizon()` (Fase 25) falls back to "end of
+ * this calendar month" for a customer who has never paid, and by the last
+ * Monday of the month no Monday is left before it rolls over, so every
+ * upcoming date reads as `upcoming_beyond_period` instead of
+ * `upcoming_unpaid`. Picking tomorrow's weekday keeps the fixture inside
+ * the same month for every day except the literal last calendar day of
+ * the month -- which cannot have any future date left "this month" no
+ * matter what weekday is chosen, an unavoidable boundary rather than a
+ * fixture bug. See `.claude/knowledge/curation-inbox.md` (2026-09-28).
+ */
+function weekdayWithinCurrentMonth(): number {
+  const now = new Date();
+  const lastDayOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();
+  const offsetDays = now.getUTCDate() < lastDayOfMonth ? 1 : 0;
+  const d = new Date(now);
+  d.setUTCDate(d.getUTCDate() + offsetDays);
+  return d.getUTCDay();
+}
+
 async function setupPilates(prefix: string, capacity: number) {
   const owner = await createSignedInUser(prefix);
   const org = await createOrganization(owner, `${prefix}-org`);
@@ -38,14 +60,16 @@ async function setupPilates(prefix: string, capacity: number) {
     .select()
     .single();
 
-  // Monday 09:00-10:00, the user's actual example.
+  // 09:00-10:00, the user's actual example (originally Monday, hardcoded);
+  // the weekday itself is picked dynamically -- see
+  // weekdayWithinCurrentMonth() above for why.
   const { data: rule } = await owner.client
     .from("schedule_rules")
     .insert({
       organization_id: org.id,
       service_id: service!.id,
       resource_id: resource!.id,
-      weekday: 1,
+      weekday: weekdayWithinCurrentMonth(),
       local_start_time: "09:00",
       duration_minutes: 60,
       capacity,
