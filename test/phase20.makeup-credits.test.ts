@@ -213,6 +213,21 @@ describe("Phase 20: makeup credits (ADR-0025)", () => {
     const { owner, org, service, resource, planId } = await setupOrgWithPaidQuotaService("p20-issue");
     createdUserIds.push(owner.id);
 
+    // This test redeems the credit on a DIFFERENT weekday than the one
+    // that issued it (that's the point -- "any slot of the same service").
+    // The org's default expiry policy is END_OF_MONTH, computed from the
+    // issuing occurrence's date: near the end of a calendar month that can
+    // expire the credit before the other weekday's occurrence -- which
+    // lands next month -- ever arrives, failing for a reason this test
+    // isn't about (see .claude/knowledge/curation-inbox.md, 2026-09-28).
+    // END_OF_MONTH itself is already covered by
+    // phase31.long-billing-periods.test.ts, so decoupling from it here
+    // loses no coverage.
+    await owner.client
+      .from("services")
+      .update({ makeup_credit_expiry_override: "DAYS_AFTER", makeup_credit_expiry_days_override: 30 })
+      .eq("id", service.id);
+
     const rule = await createRule(owner, org, service, resource, 2, 5);
 
     const { customer, customerRow } = await enroll(owner, org, "p20-issue-cust");
