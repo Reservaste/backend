@@ -159,7 +159,14 @@ site_url = "http://127.0.0.1:3000"
 # The public URL that Auth serves on. Defaults to the API external URL with `/auth/v1` appended.
 # external_url = ""
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["https://127.0.0.1:3000"]
+# http(s)://127.0.0.1:3000/** y http://localhost:3000/**: sin esto, GoTrue no
+# reconoce el next=<returnTo> que emailRedirectTo arma (/auth/callback y ahora
+# /auth/confirm, ADR-0041) y cae en silencio al site_url pelado, perdiendo el
+# ?c=<nonce> de ADR-0040 -- afecta por igual al link PKCE viejo y al nuevo de
+# token_hash, verificado en vivo contra Supabase local. Confirmar el
+# equivalente en el dashboard de produccion (Authentication > URL
+# Configuration > Redirect URLs).
+additional_redirect_urls = ["https://127.0.0.1:3000", "http://127.0.0.1:3000/**", "http://localhost:3000/**"]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to auth.external_url.
@@ -246,6 +253,15 @@ otp_expiry = 3600
 # [auth.email.template.invite]
 # subject = "You have been invited"
 # content_path = "./supabase/templates/invite.html"
+
+# ADR-0041: reemplaza el link de confirmacion PKCE ({{ .ConfirmationURL }})
+# por uno basado en token_hash + verifyOtp, que no depende de la cookie
+# code_verifier del navegador que inicio el signup. Consumido por
+# frontend/app/auth/confirm/route.ts con type="email" (verificado contra
+# Supabase local: ver docs/decisions.md ADR-0041).
+[auth.email.template.confirmation]
+subject = "Confirm your signup"
+content_path = "./supabase/templates/confirmation.html"
 
 # Uncomment to customize notification email template
 # [auth.email.notification.password_changed]
