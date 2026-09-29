@@ -22,6 +22,7 @@ import {
   createServicePlan,
   createSignedInUser,
   isoDate,
+  nextWeekdayWithinCurrentMonth,
   payFor,
   type SignedInUser,
 } from "./helpers";
@@ -129,16 +130,23 @@ describe("Phase 38: recurring_booking_occurrences() -- detalle fecha por fecha",
     const f = await setupWeeklyQuotaService("p38-detail", 3);
     createdUserIds.push(f.owner.id);
 
-    const rule = await createRule(f, 1);
+    // La primera ocurrencia tiene que caer DENTRO del mes calendario
+    // vigente para que exista una fecha UNPAID (ver el comentario debajo):
+    // sin pago que cubra hoy, customer_billing_horizon() cae al fallback
+    // "fin de este mes" (Fase 25). Un offset fijo (antes createRule(f, 1),
+    // "mañana") rompía cerca de fin de mes -- mismo bug que
+    // test/phase25.production-feedback.test.ts, ver
+    // nextWeekdayWithinCurrentMonth() en test/helpers.ts.
+    const rule = await createRule(f, nextWeekdayWithinCurrentMonth());
     const { customer, customerRow } = await enroll(f, "p38-detail-cust");
     createdUserIds.push(customer.id);
 
     // Cubre un tramo intermedio (día 6 a 30) sin cubrir HOY -- así
     // customer_billing_horizon() no toma la rama "vigente hoy" y cae a la
     // rama de fallback (fin del mes calendario), que es lo que separa
-    // UNPAID (fecha de mañana, sin pago, dentro del horizonte) de
-    // BEYOND_PERIOD (fechas más allá del día 30, sin pago, fuera del
-    // horizonte) alrededor de la ventana pagada.
+    // UNPAID (fecha de la próxima ocurrencia, sin pago, dentro del
+    // horizonte) de BEYOND_PERIOD (fechas más allá del día 30, sin pago,
+    // fuera del horizonte) alrededor de la ventana pagada.
     await payFor(f.owner, {
       organizationId: f.org.id,
       customerId: customerRow.id,

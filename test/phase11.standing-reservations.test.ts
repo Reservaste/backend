@@ -12,6 +12,7 @@ import {
   createSignedInUser,
   firstFutureOccurrence,
   makeServicePaid,
+  nextWeekdayWithinCurrentMonth,
   payFor,
   type SignedInUser,
 } from "./helpers";
@@ -29,19 +30,15 @@ function isoDate(offsetDays: number) {
  * this calendar month" for a customer who has never paid, and by the last
  * Monday of the month no Monday is left before it rolls over, so every
  * upcoming date reads as `upcoming_beyond_period` instead of
- * `upcoming_unpaid`. Picking tomorrow's weekday keeps the fixture inside
- * the same month for every day except the literal last calendar day of
- * the month -- which cannot have any future date left "this month" no
- * matter what weekday is chosen, an unavoidable boundary rather than a
- * fixture bug. See `.claude/knowledge/curation-inbox.md` (2026-09-28).
+ * `upcoming_unpaid`. Delegates to the shared, org-timezone-aware
+ * `nextWeekdayWithinCurrentMonth()` (test/helpers.ts) rather than the
+ * UTC-only version this function used to compute inline -- that version had
+ * a documented, non-blocking gap right around midnight UTC (Montevideo is
+ * UTC-3, so its local "end of month" can differ from UTC's for ~3h). See
+ * `.claude/knowledge/curation-inbox.md` (2026-09-28, resolved 2026-09-29).
  */
 function weekdayWithinCurrentMonth(): number {
-  const now = new Date();
-  const lastDayOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();
-  const offsetDays = now.getUTCDate() < lastDayOfMonth ? 1 : 0;
-  const d = new Date(now);
-  d.setUTCDate(d.getUTCDate() + offsetDays);
-  return d.getUTCDay();
+  return (new Date().getUTCDay() + nextWeekdayWithinCurrentMonth()) % 7;
 }
 
 async function setupPilates(prefix: string, capacity: number) {
