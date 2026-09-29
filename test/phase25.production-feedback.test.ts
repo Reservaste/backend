@@ -28,6 +28,7 @@ import {
   createSignedInUser,
   firstFutureOccurrence,
   isoDate,
+  nextWeekdayWithinCurrentMonth,
   payFor,
   type SignedInUser,
 } from "./helpers";
@@ -188,7 +189,13 @@ describe("Phase 25: feedback del primer cliente en producción", () => {
     const f = await setupPaidService("p25-really-unpaid");
     createdUserIds.push(f.owner.id);
 
-    const rule = await createRule(f, 2);
+    // Necesita que la próxima ocurrencia caiga DENTRO del mes calendario
+    // vigente: sin ningún pago, customer_billing_horizon() cae al fallback
+    // "fin de este mes" (Fase 25), y este test prueba justamente que esas
+    // fechas cuentan como upcoming_unpaid. Un offset fijo (createRule(f, 2))
+    // rompía cerca de fin de mes -- ver nextWeekdayWithinCurrentMonth() en
+    // test/helpers.ts.
+    const rule = await createRule(f, nextWeekdayWithinCurrentMonth());
     const { customer, customerRow } = await enroll(f, "p25-really-unpaid-cust");
     createdUserIds.push(customer.id);
 

@@ -226,6 +226,102 @@ export function isoDate(offsetDays: number): string {
 }
 
 /**
+ * The org timezone every fixture in this file hardcodes (createOrganization()
+ * above). Fixed offset, no DST: Uruguay does not observe it.
+ */
+const FIXTURE_ORG_UTC_OFFSET_HOURS = 3; // America/Montevideo = UTC-3
+
+/**
+ * A weekdayOffset (0-6) for `createRule(f, weekdayOffset)`-style test
+ * helpers whose next occurrence is guaranteed to land within the CURRENT
+ * calendar month, in the organization's local timezone -- for the tests
+ * that specifically need that (asserting on `upcoming_unpaid` /
+ * `upcoming_beyond_period` when the customer has no payment covering
+ * today).
+ *
+ * Why this exists: `customer_billing_horizon()` (Fase 25,
+ * 20260923120000_phase25_payment_duplicates_and_billing_horizon.sql) falls
+ * back to "end of the CURRENT LOCAL calendar month" when a customer has no
+ * PAID payment covering today. A fixed weekdayOffset (e.g. "in 2 days")
+ * silently assumes there is always room left in the current month before
+ * that fallback horizon -- false within the last few days of any month.
+ * That broke CI for real on 2026-09-29
+ * (test/phase25.production-feedback.test.ts, "un cliente que NO pagó el mes
+ * en curso SÍ figura con fechas esperando pago" -- the offset landed on
+ * 1/10, one day past the 30/09 fallback horizon). The same pattern was
+ * already fixed once for test/phase11.standing-reservations.test.ts on
+ * 2026-09-28 (see .claude/knowledge/curation-inbox.md) with a narrower,
+ * file-local `weekdayWithinCurrentMonth()` that had a known, non-blocking
+ * gap (it compared against the UTC calendar month, not the org's local
+ * one). This is the general version, closing that gap too, used wherever
+ * the same fragile assumption shows up.
+ *
+ * This walks the actual arithmetic the database uses instead of assuming a
+ * fixed offset is safe:
+ *
+ *  - generate_slot_occurrences_for_rule() anchors the occurrence's calendar
+ *    day on Postgres `current_date`, which runs in UTC on this stack
+ *    (confirmed live: `show timezone` -> UTC) -- NOT the org's local
+ *    timezone.
+ *  - That UTC calendar day + local_start_time is then interpreted AS the
+ *    org's local wall-clock time (`... AT TIME ZONE v_org.timezone`) to get
+ *    `start_at`, so `slot_local_date()` (which converts `start_at` back via
+ *    the same org timezone) always round-trips to that same UTC-anchored
+ *    calendar day.
+ *  - `customer_billing_horizon()`'s fallback instead compares against
+ *    `now() AT TIME ZONE org.timezone` -- the org's LOCAL current date, not
+ *    UTC's `current_date`. Near midnight UTC (00:00-03:00, since Montevideo
+ *    is UTC-3) those two "todays" can be different calendar dates -- flagged
+ *    as a non-blocking follow-up in curation-inbox.md (2026-09-28) and
+ *    closed here by computing the local month-end from the org's actual
+ *    local "today" instead of UTC's.
+ *
+ * Every fixture in this codebase hardcodes `p_timezone: "America/Montevideo"`
+ * (createOrganization() above), so a fixed UTC-3 offset is enough here --
+ * this does not need a general IANA-timezone resolver.
+ *
+ * Edge case: offset 0 (today) trivially lands within the current month, so
+ * the only way NO offset in 0-6 qualifies is if TODAY is the org-local last
+ * day of the month AND today's `localStartTime` has already passed locally
+ * -- then every later offset is already next month. That is an unavoidable,
+ * roughly 1-in-30 (and further narrowed to a specific hour range) residual
+ * boundary, not something a fixture can route around without mocking the
+ * clock -- not worth it for a test helper. The fallback below picks
+ * tomorrow anyway and accepts that a test relying on this helper could fail
+ * only inside that narrow window.
+ */
+export function nextWeekdayWithinCurrentMonth(localStartTime = "09:00"): number {
+  const [hh, mm] = localStartTime.split(":").map(Number);
+  const now = new Date();
+  const nowMs = now.getTime();
+
+  // The calendar day generate_slot_occurrences_for_rule() anchors on
+  // (Postgres current_date, UTC).
+  const todayUtcMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+
+  // The org's LOCAL "today", which is what customer_billing_horizon()'s
+  // fallback uses to compute "end of this calendar month".
+  const localNow = new Date(nowMs - FIXTURE_ORG_UTC_OFFSET_HOURS * 3_600_000);
+  const localMonthEndUtcMs = Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth() + 1, 0);
+
+  for (let offset = 0; offset <= 6; offset++) {
+    const dayUtcMs = todayUtcMs + offset * 86_400_000;
+    // start_at = (day + local_start_time) AT TIME ZONE org.timezone --
+    // Montevideo local wall-clock -> UTC is a fixed "+3h" (no DST).
+    const startAtMs = dayUtcMs + (hh + FIXTURE_ORG_UTC_OFFSET_HOURS) * 3_600_000 + mm * 60_000;
+
+    const isStrictlyFuture = startAtMs > nowMs;
+    // slot_local_date() round-trips back to this same calendar day.
+    const withinLocalMonth = dayUtcMs <= localMonthEndUtcMs;
+
+    if (isStrictlyFuture && withinLocalMonth) return offset;
+  }
+
+  // Residual boundary above -- see doc comment.
+  return 1;
+}
+
+/**
  * Registers a payment covering [from, to] for a customer on a service.
  * Since ADR-0024 a payment is anchored to a ServicePlan: when the caller
  * does not name one, the service gets (or reuses) its UNLIMITED plan,
