@@ -50,23 +50,37 @@ export async function createSignedInUser(
   }
 
   const client = createClient(SUPABASE_URL, ANON_KEY);
-  const { error: signInError } = await client.auth.signInWithPassword({
-    email,
-    password: PASSWORD,
-    // ADR-0043 (correccion post-review, punto 5): Turnstile esta
-    // habilitado (supabase/config.toml, [auth.captcha]) con la clave de
-    // prueba "always passes" que Cloudflare publica para automatizar
-    // tests sin navegador -- acepta cualquier token no vacio. Sin esto,
-    // GoTrue devuelve `captcha_failed` (confirmado en vivo) porque el
-    // grant `password` tambien pasa por la verificacion de captcha, no
-    // solo el signup.
-    options: { captchaToken: "test-suite-turnstile-token" },
-  });
-  if (signInError) {
-    throw new Error(`failed to sign in test user ${email}: ${signInError.message}`);
-  }
 
-  return { id: data.user.id, email, client };
+  // Contra un proyecto hosteado (reservaste-stg, a diferencia de Docker
+  // local que no tenia este limite), GoTrue rate-limitea signInWithPassword
+  // por IP -- la suite entera corre desde la misma IP y crea cientos de
+  // sesiones, asi que lo pisa seguido incluso con el limite del dashboard
+  // subido. Reintento con backoff exponencial en vez de fallar duro: es un
+  // 429 transitorio, no un error de logica del test.
+  let signInError: { message: string } | null = null;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const result = await client.auth.signInWithPassword({
+      email,
+      password: PASSWORD,
+      // ADR-0043 (correccion post-review, punto 5): Turnstile esta
+      // habilitado (supabase/config.toml, [auth.captcha]) con la clave de
+      // prueba "always passes" que Cloudflare publica para automatizar
+      // tests sin navegador -- acepta cualquier token no vacio. Sin esto,
+      // GoTrue devuelve `captcha_failed` (confirmado en vivo) porque el
+      // grant `password` tambien pasa por la verificacion de captcha, no
+      // solo el signup.
+      options: { captchaToken: "test-suite-turnstile-token" },
+    });
+    signInError = result.error;
+    if (!signInError) {
+      return { id: data.user.id, email, client };
+    }
+    if (!signInError.message.toLowerCase().includes("rate limit")) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
+  }
+  throw new Error(`failed to sign in test user ${email}: ${signInError?.message}`);
 }
 
 /**
