@@ -160,12 +160,12 @@ site_url = "http://127.0.0.1:3000"
 # external_url = ""
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
 # http(s)://127.0.0.1:3000/** y http://localhost:3000/**: sin esto, GoTrue no
-# reconoce el next=<returnTo> que emailRedirectTo arma (/auth/callback y ahora
-# /auth/confirm, ADR-0041) y cae en silencio al site_url pelado, perdiendo el
-# ?c=<nonce> de ADR-0040 -- afecta por igual al link PKCE viejo y al nuevo de
-# token_hash, verificado en vivo contra Supabase local. Confirmar el
-# equivalente en el dashboard de produccion (Authentication > URL
-# Configuration > Redirect URLs).
+# reconoce el next=<returnTo> que signInWithOAuth() arma para /auth/callback
+# y cae en silencio al site_url pelado, perdiendo el ?c=<nonce> de continuacion
+# de ADR-0040 (ACOTADO por ADR-0043 al camino de Google OAuth unicamente --
+# el signup por email/contraseña ya no manda ningun email ni pasa por este
+# redirect). Confirmar el equivalente en el dashboard de produccion
+# (Authentication > URL Configuration > Redirect URLs).
 additional_redirect_urls = ["https://127.0.0.1:3000", "http://127.0.0.1:3000/**", "http://localhost:3000/**"]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
@@ -216,11 +216,29 @@ token_verifications = 30
 # Number of Web3 logins that can be made in a 5 minute interval per IP address.
 web3 = 30
 
-# Configure one of the supported captcha providers: `hcaptcha`, `turnstile`.
-# [auth.captcha]
-# enabled = true
-# provider = "hcaptcha"
-# secret = ""
+# ADR-0043 (correccion post-review de seguridad, punto 5): Turnstile
+# (Cloudflare, gratis) como mitigacion de creacion masiva de cuentas --
+# sin esto, sin confirmacion de email (ADR-0043) y sin rate limit por
+# email real, nada encarece scriptear miles de signups.
+#
+# El `secret` de abajo es la clave de PRUEBA que Cloudflare publica y
+# documenta para automatizar tests sin un navegador real ("always passes",
+# https://developers.cloudflare.com/turnstile/troubleshooting/testing/):
+# siteverify acepta cualquier token no vacio como valido. No es secreta
+# de verdad -- mismo criterio que este repo ya usa para ANON_KEY/
+# SERVICE_ROLE_KEY en backend/test/helpers.ts (valores demo fijos que
+# `supabase start` imprime, nunca validos en remoto). Producción NECESITA
+# reemplazarla por una clave real: crear un Site Key + Secret Key en
+# https://dash.cloudflare.com/?to=/:account/turnstile (gratis) y cargar el
+# secreto en el dashboard de Supabase -- Authentication > Attack
+# Protection (o la seccion equivalente segun version del dashboard) ->
+# habilitar Turnstile y pegar el Secret Key ahi. El Site Key (publico) lo
+# necesita frontend-engineer para el widget de Turnstile en el formulario
+# de signup/login -- ver nota de contrato en docs/decisions.md ADR-0043.
+[auth.captcha]
+enabled = true
+provider = "turnstile"
+secret = "1x0000000000000000000000000000000AA"
 
 [auth.email]
 # Allow/disallow new user signups via email to your project.
@@ -229,6 +247,11 @@ enable_signup = true
 # addresses. If disabled, only the new email is required to confirm.
 double_confirm_changes = true
 # If enabled, users need to confirm their email address before signing in.
+# ADR-0043: false es el estado definitivo del proyecto, no un default temporal
+# de desarrollo -- signUp() (email/contraseña) devuelve sesion inmediatamente,
+# sin mandar ningun email, ni para Customer gestionado (ADR-0026) ni para
+# OrganizationMember. Equivalente manual para produccion: Authentication >
+# Providers > Email > toggle "Confirm email" off (ver docs/decisions.md).
 enable_confirmations = false
 # If enabled, users will need to reauthenticate or have logged in recently to change their password.
 secure_password_change = false
@@ -253,15 +276,6 @@ otp_expiry = 3600
 # [auth.email.template.invite]
 # subject = "You have been invited"
 # content_path = "./supabase/templates/invite.html"
-
-# ADR-0041: reemplaza el link de confirmacion PKCE ({{ .ConfirmationURL }})
-# por uno basado en token_hash + verifyOtp, que no depende de la cookie
-# code_verifier del navegador que inicio el signup. Consumido por
-# frontend/app/auth/confirm/route.ts con type="email" (verificado contra
-# Supabase local: ver docs/decisions.md ADR-0041).
-[auth.email.template.confirmation]
-subject = "Confirm your signup"
-content_path = "./supabase/templates/confirmation.html"
 
 # Uncomment to customize notification email template
 # [auth.email.notification.password_changed]

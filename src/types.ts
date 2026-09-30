@@ -192,8 +192,13 @@ export type CustomerCancellationReason = "CUSTOMER_REQUEST" | "ORGANIZATION_REMO
  * ADR-0026: a Customer can now exist without a Profile ("managed
  * customer") -- created by staff from a name+phone, agendable and
  * chargeable, with no session and nothing visible to them. `profileId`
- * becomes non-null ("activated") only through claim_customer_activation()
- * (or the pre-existing enroll_customer_by_email() self-service path).
+ * becomes non-null ("activated") only through claim_customer_activation().
+ * enroll_customer_by_email() used to be a second, direct-by-email path but
+ * ADR-0043 (post-review security correction) revoked its EXECUTE grant for
+ * anon/authenticated: it granted Customer access to whoever already had
+ * that email registered in auth.users, without proving they were the real
+ * person. The function still exists (kept for backward-compatible schema
+ * reasons), it just has no callable path anymore.
  */
 export interface Customer {
   id: string;

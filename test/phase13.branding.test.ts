@@ -24,13 +24,15 @@ const PNG = new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 
 
 async function addStaff(owner: SignedInUser, organizationId: string, prefix: string) {
   const staff = await createSignedInUser(prefix);
-  // The email lives in auth.users, not in profiles.
-  const { data: user } = await admin.auth.admin.getUserById(staff.id);
-  const { error } = await owner.client.rpc("invite_member_by_email", {
-    p_organization_id: organizationId,
-    p_email: user.user!.email!,
-    p_role: "STAFF",
-  });
+  // ADR-0043 (corrección post-review): invite_member_by_email() ya no
+  // tiene EXECUTE para authenticated (le daba membresía a quien ocupara
+  // un email sin probar identidad). Sumar un STAFF para un fixture de test
+  // se hace con la misma escritura directa que ya usa
+  // test/phase32.configurable-roles.test.ts -- organization_members_write_owner
+  // permite al OWNER insertar directo.
+  const { error } = await owner.client
+    .from("organization_members")
+    .insert({ organization_id: organizationId, profile_id: staff.id, role: "STAFF", created_by: owner.id });
   if (error) throw new Error(`failed to add staff: ${error.message}`);
   return staff;
 }

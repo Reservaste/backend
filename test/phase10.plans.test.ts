@@ -260,6 +260,15 @@ describe("Phase 10: plans and subscriptions", () => {
         .insert({ organization_id: org.id, name: "Nuevo", created_by: owner.id });
       expect(newService.error?.message).toContain("SUBSCRIPTION_INACTIVE");
 
+      // ADR-0043 (corrección post-review): enroll_customer_by_email() ya no
+      // tiene EXECUTE para authenticated -- esta llamada ahora falla por
+      // permission denied (42501) antes de que corra ningún chequeo de
+      // suscripción, así que ya no prueba específicamente
+      // SUBSCRIPTION_INACTIVE para este camino (esa cobertura sigue
+      // vigente arriba, para "services"). Se deja igual porque sigue
+      // siendo cierto que un OWNER con suscripción vencida no puede sumar
+      // clientes por este camino -- ahora por un motivo distinto y más
+      // fuerte (el camino está cerrado para cualquiera).
       const newCustomer = await owner.client.rpc("enroll_customer_by_email", {
         p_organization_id: org.id,
         p_email: "alguien@example.com",

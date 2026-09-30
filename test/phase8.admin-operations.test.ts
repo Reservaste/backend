@@ -104,84 +104,57 @@ describe("Phase 8: admin operations", () => {
     expect(raised.error).toBeNull();
   });
 
-  it("enrolls a customer by email, and re-enrolling a removed one reactivates instead of duplicating", async () => {
-    const { owner, org } = await setupOrg("p8-enroll");
+  it("enroll_customer_by_email() e invite_member_by_email() quedan revocadas para authenticated (ADR-0043, corrección post-review)", async () => {
+    // Las dos RPC le daban acceso (Customer o membresía, incluido OWNER) a
+    // quien tuviera ese email registrado en auth.users, sin ninguna prueba
+    // de que fuera la persona real -- el hallazgo del segundo gate de
+    // security-engineer sobre ADR-0043. Los reemplazos ya existentes no
+    // dependen de "el email prueba identidad": activación de cliente
+    // gestionado por link de WhatsApp (ADR-0026) e invitación de equipo
+    // por token (ADR-0034). El permission denied llega ANTES de que corra
+    // cualquier chequeo interno de la función (NOT_AUTHORIZED,
+    // PROFILE_NOT_FOUND), para cualquier caller -- miembro o no.
+    const { owner, org } = await setupOrg("p8-revoked-rpcs");
     createdUserIds.push(owner.id);
 
-    const person = await createSignedInUser("p8-enroll-person");
+    const person = await createSignedInUser("p8-revoked-person");
     createdUserIds.push(person.id);
     const { data: personProfile } = await admin.auth.admin.getUserById(person.id);
     const email = personProfile.user!.email!;
 
-    const first = await owner.client.rpc("enroll_customer_by_email", {
+    const enrollResult = await owner.client.rpc("enroll_customer_by_email", {
       p_organization_id: org.id,
       p_email: email,
     });
-    expect(first.error).toBeNull();
-    expect(first.data.is_active).toBe(true);
+    expect(enrollResult.error?.code).toBe("42501");
 
-    await owner.client.from("customers").update({ is_active: false }).eq("id", first.data.id);
-
-    const second = await owner.client.rpc("enroll_customer_by_email", {
+    const inviteResult = await owner.client.rpc("invite_member_by_email", {
       p_organization_id: org.id,
-      p_email: email.toUpperCase(), // case-insensitive lookup
+      p_email: email,
+      p_role: "STAFF",
     });
-    expect(second.error).toBeNull();
-    expect(second.data.id).toBe(first.data.id);
-    expect(second.data.is_active).toBe(true);
+    expect(inviteResult.error?.code).toBe("42501");
   });
 
-  it("refuses to enroll an email with no account, and refuses a non-member caller", async () => {
-    const { owner, org } = await setupOrg("p8-enroll-guard");
-    createdUserIds.push(owner.id);
-
-    const missing = await owner.client.rpc("enroll_customer_by_email", {
-      p_organization_id: org.id,
-      p_email: "nobody-with-this-address@example.com",
-    });
-    expect(missing.error?.message).toContain("PROFILE_NOT_FOUND");
-
-    const outsider = await createSignedInUser("p8-enroll-outsider");
-    createdUserIds.push(outsider.id);
-    const { data: outsiderUser } = await admin.auth.admin.getUserById(outsider.id);
-
-    const unauthorized = await outsider.client.rpc("enroll_customer_by_email", {
-      p_organization_id: org.id,
-      p_email: outsiderUser.user!.email!,
-    });
-    expect(unauthorized.error?.message).toContain("NOT_AUTHORIZED");
-  });
-
-  it("invites staff (OWNER only) and refuses to revoke the last OWNER", async () => {
+  it("revoking a STAFF member works and the last OWNER cannot be revoked", async () => {
     const { owner, org } = await setupOrg("p8-team");
     createdUserIds.push(owner.id);
 
+    // ADR-0043 (corrección post-review): invite_member_by_email() ya no es
+    // invocable (ver test de arriba) -- sumar un STAFF para este fixture
+    // se hace con la misma escritura directa que ya prueba
+    // organization_members_write_owner en test/phase32.configurable-roles.test.ts.
     const staffPerson = await createSignedInUser("p8-team-staff");
     createdUserIds.push(staffPerson.id);
-    const { data: staffUser } = await admin.auth.admin.getUserById(staffPerson.id);
-
-    const invited = await owner.client.rpc("invite_member_by_email", {
-      p_organization_id: org.id,
-      p_email: staffUser.user!.email!,
-      p_role: "STAFF",
-    });
-    expect(invited.error).toBeNull();
-    expect(invited.data.role).toBe("STAFF");
-
-    // STAFF cannot invite others -- that's OWNER-only.
-    const outsider = await createSignedInUser("p8-team-outsider");
-    createdUserIds.push(outsider.id);
-    const { data: outsiderUser } = await admin.auth.admin.getUserById(outsider.id);
-
-    const staffTryingToInvite = await staffPerson.client.rpc("invite_member_by_email", {
-      p_organization_id: org.id,
-      p_email: outsiderUser.user!.email!,
-      p_role: "STAFF",
-    });
-    expect(staffTryingToInvite.error?.message).toContain("NOT_AUTHORIZED");
+    const { data: staffMember, error: staffMemberError } = await owner.client
+      .from("organization_members")
+      .insert({ organization_id: org.id, profile_id: staffPerson.id, role: "STAFF", created_by: owner.id })
+      .select()
+      .single();
+    expect(staffMemberError).toBeNull();
 
     // Revoking the STAFF member is fine.
-    const revokedStaff = await owner.client.rpc("revoke_member", { p_member_id: invited.data.id });
+    const revokedStaff = await owner.client.rpc("revoke_member", { p_member_id: staffMember!.id });
     expect(revokedStaff.error).toBeNull();
     expect(revokedStaff.data.is_active).toBe(false);
 

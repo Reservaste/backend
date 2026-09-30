@@ -323,13 +323,17 @@ describe("Fase 33 -- team invitations (ADR-0034)", () => {
     const profesorId = (roleProfesor as { id: string }).id;
     const adminRoleId = (roleAdmin as { id: string }).id;
 
-    // Ya es miembro, con el rol restringido.
+    // Ya es miembro, con el rol restringido. ADR-0043 (corrección
+    // post-review) revocó invite_member_by_email() para authenticated --
+    // el fixture usa la misma escritura directa que ya prueba
+    // organization_members_write_owner en otros archivos de este repo.
     const existing = await createSignedInUser("ya-era-miembro");
-    const { error: inviteErr } = await owner.client.rpc("invite_member_by_email", {
-      p_organization_id: org.id,
-      p_email: existing.email,
-      p_role: "STAFF",
-      p_role_id: profesorId,
+    const { error: inviteErr } = await owner.client.from("organization_members").insert({
+      organization_id: org.id,
+      profile_id: existing.id,
+      role: "STAFF",
+      role_id: profesorId,
+      created_by: owner.id,
     });
     expect(inviteErr).toBeNull();
 
@@ -433,13 +437,17 @@ describe("Fase 33 -- team invitations (ADR-0034)", () => {
     const email = invitedEmail("llega-sin-cupo");
     const { data: issued } = await issue(owner, org.id, email);
 
-    // El cupo se llenó entre la emisión y el click (alguien más entró por el
-    // camino sincrónico de invite_member_by_email()).
+    // El cupo se llenó entre la emisión y el click (alguien más entró antes
+    // de que existiera el cupo libre). ADR-0043 (corrección post-review)
+    // revocó invite_member_by_email() para authenticated -- el fixture usa
+    // la misma escritura directa que ya prueba
+    // organization_members_write_owner en otros archivos de este repo.
     const otherStaff = await createSignedInUser("staff-que-entro-antes");
-    const { error: inviteErr } = await owner.client.rpc("invite_member_by_email", {
-      p_organization_id: org.id,
-      p_email: otherStaff.email,
-      p_role: "STAFF",
+    const { error: inviteErr } = await owner.client.from("organization_members").insert({
+      organization_id: org.id,
+      profile_id: otherStaff.id,
+      role: "STAFF",
+      created_by: owner.id,
     });
     expect(inviteErr).toBeNull();
 
@@ -475,11 +483,16 @@ describe("Fase 33 -- team invitations (ADR-0034)", () => {
     const owner = await createSignedInUser("owner-gate");
     const org = await createOrganization(owner, "org-gate");
 
+    // ADR-0043 (corrección post-review): invite_member_by_email() ya no
+    // tiene EXECUTE para authenticated -- el fixture usa la misma
+    // escritura directa que ya prueba organization_members_write_owner en
+    // otros archivos de este repo.
     const staff = await createSignedInUser("staff-gate");
-    await owner.client.rpc("invite_member_by_email", {
-      p_organization_id: org.id,
-      p_email: staff.email,
-      p_role: "STAFF",
+    await owner.client.from("organization_members").insert({
+      organization_id: org.id,
+      profile_id: staff.id,
+      role: "STAFF",
+      created_by: owner.id,
     });
 
     const { error: issueErr } = await issue(staff, org.id, invitedEmail("por-staff"));
