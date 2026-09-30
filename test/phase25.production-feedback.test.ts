@@ -27,8 +27,8 @@ import {
   createServicePlan,
   createSignedInUser,
   firstFutureOccurrence,
+  insertOccurrenceLaterToday,
   isoDate,
-  nextWeekdayWithinCurrentMonth,
   payFor,
   type SignedInUser,
 } from "./helpers";
@@ -189,15 +189,26 @@ describe("Phase 25: feedback del primer cliente en producción", () => {
     const f = await setupPaidService("p25-really-unpaid");
     createdUserIds.push(f.owner.id);
 
-    // Necesita que la próxima ocurrencia caiga DENTRO del mes calendario
-    // vigente: sin ningún pago, customer_billing_horizon() cae al fallback
-    // "fin de este mes" (Fase 25), y este test prueba justamente que esas
-    // fechas cuentan como upcoming_unpaid. Un offset fijo (createRule(f, 2))
-    // rompía cerca de fin de mes -- ver nextWeekdayWithinCurrentMonth() en
-    // test/helpers.ts.
-    const rule = await createRule(f, nextWeekdayWithinCurrentMonth());
+    // Necesita que exista una ocurrencia DENTRO del mes calendario vigente:
+    // sin ningún pago, customer_billing_horizon() cae al fallback "fin de
+    // este mes" (Fase 25), y este test prueba justamente que esas fechas
+    // cuentan como upcoming_unpaid. La regla en sí puede usar cualquier
+    // weekday (offset fijo, "mañana" -- nunca hoy, siempre futuro): lo que
+    // antes rompía cerca de fin de mes era intentar forzar ESE weekday a
+    // caer dentro del mes vigente. En vez de eso, se inserta directamente
+    // la ocurrencia puntual que necesita estar en el mes en curso -- la
+    // única fecha que está garantizado que cae en el mes vigente en
+    // cualquier día del mes, incluido el último, es "hoy" (ver
+    // insertOccurrenceLaterToday() en test/helpers.ts).
+    const rule = await createRule(f, 1);
     const { customer, customerRow } = await enroll(f, "p25-really-unpaid-cust");
     createdUserIds.push(customer.id);
+
+    await insertOccurrenceLaterToday(rule, {
+      organizationId: f.org.id,
+      serviceId: f.service.id,
+      resourceId: f.resource.id,
+    });
 
     await f.owner.client.rpc("admin_create_recurring_booking", {
       p_schedule_rule_id: rule.id,
