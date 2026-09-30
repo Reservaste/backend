@@ -189,6 +189,15 @@ export interface Profile {
 export type CustomerCancellationReason = "CUSTOMER_REQUEST" | "ORGANIZATION_REMOVED";
 
 /**
+ * ADR-0047: STAFF is every alta that existed before Phase 45 (front-desk
+ * enrollment, a managed customer, a direct insert from the panel).
+ * SELF_SERVICE is written only by book_slot() when the organization has
+ * `open_booking_enabled` and the authenticated caller had no Customer row
+ * (active or inactive) yet for that organization.
+ */
+export type CustomerSource = "STAFF" | "SELF_SERVICE";
+
+/**
  * ADR-0026: a Customer can now exist without a Profile ("managed
  * customer") -- created by staff from a name+phone, agendable and
  * chargeable, with no session and nothing visible to them. `profileId`
@@ -213,6 +222,8 @@ export interface Customer {
   claimedAt: string | null;
   /** Set by merge_customers() on the (now inactive) source row. Ref: ADR-0026 Sec 2.5. */
   mergedIntoCustomerId: string | null;
+  /** ADR-0047. Default "STAFF"; "SELF_SERVICE" only for an open-booking on-the-fly alta. */
+  source: CustomerSource;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -684,7 +695,16 @@ export type CanBookReason =
   /** ADR-0024: this series exceeds the plan's frequency. Remedy: upgrade the plan or drop a series. */
   | "OVER_PLAN_QUOTA"
   /** ADR-0024: the service demands payment and has no active plan. An owner configuration error. */
-  | "SERVICE_HAS_NO_PLAN";
+  | "SERVICE_HAS_NO_PLAN"
+  /**
+   * ADR-0047: no Customer row exists yet (active or inactive), but the
+   * organization has `open_booking_enabled` -- the public UI can offer
+   * "Book" instead of "ask the business to enroll you". book_slot() turns
+   * this into a real Customer (source=SELF_SERVICE) and a normal "OK" in
+   * the same transaction as the booking; this value itself is never
+   * returned by book_slot()'s own status.
+   */
+  | "OK_OPEN_BOOKING";
 
 /** Why a recurring date could not be confirmed. Ref: ADR-0018, ADR-0024. */
 export type NotGeneratedReason =
@@ -695,7 +715,31 @@ export type NotGeneratedReason =
   | "OVER_PLAN_QUOTA";
 
 export interface BookSlotResult {
-  status: CanBookReason | "DUPLICATE";
+  /**
+   * ADR-0047: `RATE_LIMITED_HOURLY`/`RATE_LIMITED_DAILY` are book_slot()'s
+   * own statuses (never can_customer_book()'s) for the open-booking
+   * on-the-fly alta rate limit -- `OK_OPEN_BOOKING` itself is never a real
+   * status of a finished book_slot() call: by the time it would apply, the
+   * alta has already happened and the call proceeds to a normal "OK" (or
+   * fails for an unrelated reason, e.g. `SLOT_FULL`/`PAYMENT_REQUIRED`).
+   *
+   * ADR-0047, post-gate security correction (same phase, no new
+   * migration): `SELF_SERVICE_BOOKING_LIMIT_REACHED` -- a `source =
+   * 'SELF_SERVICE'` Customer already has 2 CONFIRMED future Bookings; the
+   * business verifies the customer (sets `source = 'STAFF'`) to lift it.
+   * `ORGANIZATION_NOT_ACCEPTING_NEW_CUSTOMERS` -- the on-the-fly alta's
+   * INSERT hit the plan's `max_customers` limit or the organization's
+   * subscription is inactive (Phase 10's `enforce_plan_limit()` trigger);
+   * deliberately opaque, never surfaces the raw `PLAN_LIMIT_REACHED: ...
+   * (n/n)` detail to an authenticated caller.
+   */
+  status:
+    | CanBookReason
+    | "DUPLICATE"
+    | "RATE_LIMITED_HOURLY"
+    | "RATE_LIMITED_DAILY"
+    | "SELF_SERVICE_BOOKING_LIMIT_REACHED"
+    | "ORGANIZATION_NOT_ACCEPTING_NEW_CUSTOMERS";
   booking?: Booking;
   /** ADR-0025: set when the booking was covered by a MakeupCredit, which book_slot()/admin_book_for_customer() then consumed atomically. */
   makeupCreditId?: string | null;
