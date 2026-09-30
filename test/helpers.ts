@@ -243,93 +243,111 @@ export function isoDate(offsetDays: number): string {
 const FIXTURE_ORG_UTC_OFFSET_HOURS = 3; // America/Montevideo = UTC-3
 
 /**
- * A weekdayOffset (0-6) for `createRule(f, weekdayOffset)`-style test
- * helpers whose next occurrence is guaranteed to land within the CURRENT
- * calendar month, in the organization's local timezone -- for the tests
- * that specifically need that (asserting on `upcoming_unpaid` /
- * `upcoming_beyond_period` when the customer has no payment covering
- * today).
+ * Inserts a `slot_occurrence` directly (service-role client, bypassing the
+ * generator entirely) at a deterministic instant guaranteed to be
+ * (a) strictly in the future and (b) within the organization's LOCAL
+ * "today" -- which, by definition, is always on/before the local end of
+ * the CURRENT calendar month, on literally any day of the month, including
+ * the last one.
  *
- * Why this exists: `customer_billing_horizon()` (Fase 25,
- * 20260923120000_phase25_payment_duplicates_and_billing_horizon.sql) falls
- * back to "end of the CURRENT LOCAL calendar month" when a customer has no
- * PAID payment covering today. A fixed weekdayOffset (e.g. "in 2 days")
- * silently assumes there is always room left in the current month before
- * that fallback horizon -- false within the last few days of any month.
- * That broke CI for real on 2026-09-29
- * (test/phase25.production-feedback.test.ts, "un cliente que NO pagó el mes
- * en curso SÍ figura con fechas esperando pago" -- the offset landed on
- * 1/10, one day past the 30/09 fallback horizon). The same pattern was
- * already fixed once for test/phase11.standing-reservations.test.ts on
- * 2026-09-28 (see .claude/knowledge/curation-inbox.md) with a narrower,
- * file-local `weekdayWithinCurrentMonth()` that had a known, non-blocking
- * gap (it compared against the UTC calendar month, not the org's local
- * one). This is the general version, closing that gap too, used wherever
- * the same fragile assumption shows up.
+ * Replaces the earlier `nextWeekdayWithinCurrentMonth()` (removed
+ * 2026-09-30), which tried to find a weekday offset (0-6 days from today)
+ * whose auto-generated occurrence would land within the current month. That
+ * approach has a real, unavoidable hole baked into the requirement itself:
+ * near the end of the month, NO offset > 0 can land within the current
+ * month (tomorrow is already next month), and if the rule's local start
+ * time has already passed today, offset 0 doesn't work either -- there is
+ * no future weekday occurrence left "within this month" on the actual last
+ * day of the month past its last slot's hour. That is not a fixture bug,
+ * it is a real temporal fact, and it broke CI for real, twice: once for
+ * test/phase25.production-feedback.test.ts and
+ * test/phase11.standing-reservations.test.ts on 2026-09-29, and again on
+ * 2026-09-30 itself -- the actual last day of the month -- which is the
+ * one day the "pick a weekday offset" strategy can never solve, no matter
+ * how it computes the offset (confirmed live: mocking `Date` client-side
+ * does nothing, since the relevant "today" is computed by Postgres, via
+ * `generate_slot_occurrences_for_rule()`'s `current_date` and
+ * `customer_billing_horizon()`'s `now() at time zone org.timezone`, neither
+ * of which the test process's clock can reach).
  *
- * This walks the actual arithmetic the database uses instead of assuming a
- * fixed offset is safe:
+ * The fix is to stop deriving the occurrence's date from "today plus an
+ * offset" at all for the one data point that specifically needs to land
+ * within the current calendar month (`upcoming_unpaid`, as opposed to
+ * `upcoming_beyond_period`) -- and instead insert that occurrence directly,
+ * at "later today". Today is the ONLY day-of-month value for which "within
+ * the current calendar month" is true unconditionally, on every possible
+ * day of every possible month -- which is exactly why offsets > 0 can never
+ * fully close this, and offset 0 always can.
  *
- *  - generate_slot_occurrences_for_rule() anchors the occurrence's calendar
- *    day on Postgres `current_date`, which runs in UTC on this stack
- *    (confirmed live: `show timezone` -> UTC) -- NOT the org's local
- *    timezone.
- *  - That UTC calendar day + local_start_time is then interpreted AS the
- *    org's local wall-clock time (`... AT TIME ZONE v_org.timezone`) to get
- *    `start_at`, so `slot_local_date()` (which converts `start_at` back via
- *    the same org timezone) always round-trips to that same UTC-anchored
- *    calendar day.
- *  - `customer_billing_horizon()`'s fallback instead compares against
- *    `now() AT TIME ZONE org.timezone` -- the org's LOCAL current date, not
- *    UTC's `current_date`. Near midnight UTC (00:00-03:00, since Montevideo
- *    is UTC-3) those two "todays" can be different calendar dates -- flagged
- *    as a non-blocking follow-up in curation-inbox.md (2026-09-28) and
- *    closed here by computing the local month-end from the org's actual
- *    local "today" instead of UTC's.
+ * `slot_occurrences` has no INSERT policy for regular members (Fase 3) --
+ * occurrences are meant to come only from the generator -- so this uses the
+ * service-role `admin` client, same as other direct-fixture-setup helpers
+ * in this file. Nothing reads the row's relationship to the rule's own
+ * `weekday`/`local_start_time` (`admin_create_recurring_booking()`,
+ * `admin_preview_recurring_booking()` and `generate_recurring_booking()`
+ * all query `slot_occurrences` directly by `schedule_rule_id` and
+ * `start_at`, never by re-deriving the weekday), so the inserted row does
+ * not need to match the rule's own weekday to be picked up correctly.
  *
- * Every fixture in this codebase hardcodes `p_timezone: "America/Montevideo"`
- * (createOrganization() above), so a fixed UTC-3 offset is enough here --
- * this does not need a general IANA-timezone resolver.
- *
- * Edge case: offset 0 (today) trivially lands within the current month, so
- * the only way NO offset in 0-6 qualifies is if TODAY is the org-local last
- * day of the month AND today's `localStartTime` has already passed locally
- * -- then every later offset is already next month. That is an unavoidable,
- * roughly 1-in-30 (and further narrowed to a specific hour range) residual
- * boundary, not something a fixture can route around without mocking the
- * clock -- not worth it for a test helper. The fallback below picks
- * tomorrow anyway and accepts that a test relying on this helper could fail
- * only inside that narrow window.
+ * Irreducible residual: if "now" (org-local) is within `bufferMinutes` of
+ * local midnight on the actual last day of the month, there is no future
+ * instant left today that both (a) gives the rest of the test enough time
+ * to run before asserting `start_at >= now()` server-side and (b) is still
+ * this month -- a real temporal impossibility, not a fixture bug. This
+ * shrinks the old failure window from "the entire last day of the month"
+ * (~1-in-30) down to the last minute of that day (~1-in-43200), which is as
+ * close to zero as a fixture can get without controlling the server clock.
  */
-export function nextWeekdayWithinCurrentMonth(localStartTime = "09:00"): number {
-  const [hh, mm] = localStartTime.split(":").map(Number);
-  const now = new Date();
-  const nowMs = now.getTime();
+export async function insertOccurrenceLaterToday(
+  rule: { id: string },
+  ctx: { organizationId: string; serviceId: string; resourceId: string },
+  opts: { capacity?: number; durationMinutes?: number; bufferMinutes?: number } = {},
+): Promise<{ id: string; start_at: string }> {
+  const capacity = opts.capacity ?? 5;
+  const durationMinutes = opts.durationMinutes ?? 60;
+  const bufferMinutes = opts.bufferMinutes ?? 30;
 
-  // The calendar day generate_slot_occurrences_for_rule() anchors on
-  // (Postgres current_date, UTC).
-  const todayUtcMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const nowMs = Date.now();
+  // The org's local "now" (fixed UTC-3, no DST -- see the constant above).
+  const localNowMs = nowMs - FIXTURE_ORG_UTC_OFFSET_HOURS * 3_600_000;
+  const localNow = new Date(localNowMs);
+  const localMidnightTonightMs = Date.UTC(
+    localNow.getUTCFullYear(),
+    localNow.getUTCMonth(),
+    localNow.getUTCDate() + 1,
+  );
 
-  // The org's LOCAL "today", which is what customer_billing_horizon()'s
-  // fallback uses to compute "end of this calendar month".
-  const localNow = new Date(nowMs - FIXTURE_ORG_UTC_OFFSET_HOURS * 3_600_000);
-  const localMonthEndUtcMs = Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth() + 1, 0);
+  // Stay at least a minute clear of local midnight -- crossing it would
+  // silently move the occurrence into tomorrow's calendar date, defeating
+  // the whole point. Still aim for `bufferMinutes` of runway so the rest of
+  // the test (several more RPC round-trips) has room before the occurrence
+  // needs to still read as "future" server-side.
+  const latestSafeLocalMs = localMidnightTonightMs - 60_000;
+  const desiredLocalMs = Math.max(
+    localNowMs + 1_000,
+    Math.min(localNowMs + bufferMinutes * 60_000, latestSafeLocalMs),
+  );
 
-  for (let offset = 0; offset <= 6; offset++) {
-    const dayUtcMs = todayUtcMs + offset * 86_400_000;
-    // start_at = (day + local_start_time) AT TIME ZONE org.timezone --
-    // Montevideo local wall-clock -> UTC is a fixed "+3h" (no DST).
-    const startAtMs = dayUtcMs + (hh + FIXTURE_ORG_UTC_OFFSET_HOURS) * 3_600_000 + mm * 60_000;
+  const startAtMs = desiredLocalMs + FIXTURE_ORG_UTC_OFFSET_HOURS * 3_600_000;
+  const startAt = new Date(startAtMs);
+  const endAt = new Date(startAtMs + durationMinutes * 60_000);
 
-    const isStrictlyFuture = startAtMs > nowMs;
-    // slot_local_date() round-trips back to this same calendar day.
-    const withinLocalMonth = dayUtcMs <= localMonthEndUtcMs;
-
-    if (isStrictlyFuture && withinLocalMonth) return offset;
-  }
-
-  // Residual boundary above -- see doc comment.
-  return 1;
+  const { data, error } = await admin
+    .from("slot_occurrences")
+    .insert({
+      organization_id: ctx.organizationId,
+      schedule_rule_id: rule.id,
+      service_id: ctx.serviceId,
+      resource_id: ctx.resourceId,
+      start_at: startAt.toISOString(),
+      end_at: endAt.toISOString(),
+      generated_timezone: "America/Montevideo",
+      capacity,
+    })
+    .select("id, start_at")
+    .single();
+  if (error || !data) throw new Error(`failed to insert occurrence: ${error?.message}`);
+  return data as { id: string; start_at: string };
 }
 
 /**

@@ -21,8 +21,8 @@ import {
   createOrganization,
   createServicePlan,
   createSignedInUser,
+  insertOccurrenceLaterToday,
   isoDate,
-  nextWeekdayWithinCurrentMonth,
   payFor,
   type SignedInUser,
 } from "./helpers";
@@ -130,16 +130,33 @@ describe("Phase 38: recurring_booking_occurrences() -- detalle fecha por fecha",
     const f = await setupWeeklyQuotaService("p38-detail", 3);
     createdUserIds.push(f.owner.id);
 
-    // La primera ocurrencia tiene que caer DENTRO del mes calendario
-    // vigente para que exista una fecha UNPAID (ver el comentario debajo):
-    // sin pago que cubra hoy, customer_billing_horizon() cae al fallback
-    // "fin de este mes" (Fase 25). Un offset fijo (antes createRule(f, 1),
-    // "mañana") rompía cerca de fin de mes -- mismo bug que
-    // test/phase25.production-feedback.test.ts, ver
-    // nextWeekdayWithinCurrentMonth() en test/helpers.ts.
-    const rule = await createRule(f, nextWeekdayWithinCurrentMonth());
+    // La regla usa "mañana" (offset 1, nunca hoy, siempre futuro): las
+    // ocurrencias semanales que genera sola (día 8/15/22/29 dentro de la
+    // ventana paga -> CONFIRMED; día 36 en adelante, siempre a más de un
+    // mes de distancia de "hoy" sin importar qué día del mes sea hoy ->
+    // BEYOND_PERIOD) nunca dependieron de caer dentro del mes calendario
+    // vigente, así que ese offset fijo nunca fue la parte frágil.
+    //
+    // La parte frágil era la ocurrencia UNPAID: necesita caer DENTRO del
+    // mes calendario vigente (sin pago que cubra hoy, customer_billing_
+    // horizon() cae al fallback "fin de este mes", Fase 25) Y no estar
+    // cubierta por el pago de más abajo. Un offset fijo (antes
+    // createRule(f, 1) solo, más tarde nextWeekdayWithinCurrentMonth())
+    // rompía cerca de fin de mes -- mismo bug que
+    // test/phase25.production-feedback.test.ts. Se resuelve insertando esa
+    // ocurrencia directamente en vez de derivarla de un weekday: "hoy" es
+    // la única fecha que está garantizado que cae en el mes vigente en
+    // cualquier día del mes, incluido el último (ver
+    // insertOccurrenceLaterToday() en test/helpers.ts).
+    const rule = await createRule(f, 1);
     const { customer, customerRow } = await enroll(f, "p38-detail-cust");
     createdUserIds.push(customer.id);
+
+    await insertOccurrenceLaterToday(rule, {
+      organizationId: f.org.id,
+      serviceId: f.service.id,
+      resourceId: f.resource.id,
+    });
 
     // Cubre un tramo intermedio (día 6 a 30) sin cubrir HOY -- así
     // customer_billing_horizon() no toma la rama "vigente hoy" y cae a la

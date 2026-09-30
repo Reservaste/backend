@@ -11,8 +11,8 @@ import {
   createOrganization,
   createSignedInUser,
   firstFutureOccurrence,
+  insertOccurrenceLaterToday,
   makeServicePaid,
-  nextWeekdayWithinCurrentMonth,
   payFor,
   type SignedInUser,
 } from "./helpers";
@@ -21,24 +21,6 @@ function isoDate(offsetDays: number) {
   const d = new Date();
   d.setDate(d.getDate() + offsetDays);
   return d.toISOString().slice(0, 10);
-}
-
-/**
- * A weekday whose next occurrence is guaranteed to land within the current
- * calendar month. A hardcoded Monday broke every month on its own last
- * Monday: `customer_billing_horizon()` (Fase 25) falls back to "end of
- * this calendar month" for a customer who has never paid, and by the last
- * Monday of the month no Monday is left before it rolls over, so every
- * upcoming date reads as `upcoming_beyond_period` instead of
- * `upcoming_unpaid`. Delegates to the shared, org-timezone-aware
- * `nextWeekdayWithinCurrentMonth()` (test/helpers.ts) rather than the
- * UTC-only version this function used to compute inline -- that version had
- * a documented, non-blocking gap right around midnight UTC (Montevideo is
- * UTC-3, so its local "end of month" can differ from UTC's for ~3h). See
- * `.claude/knowledge/curation-inbox.md` (2026-09-28, resolved 2026-09-29).
- */
-function weekdayWithinCurrentMonth(): number {
-  return (new Date().getUTCDay() + nextWeekdayWithinCurrentMonth()) % 7;
 }
 
 async function setupPilates(prefix: string, capacity: number) {
@@ -57,16 +39,23 @@ async function setupPilates(prefix: string, capacity: number) {
     .select()
     .single();
 
-  // 09:00-10:00, the user's actual example (originally Monday, hardcoded);
-  // the weekday itself is picked dynamically -- see
-  // weekdayWithinCurrentMonth() above for why.
+  // 09:00-10:00, the user's actual example (originally Monday, hardcoded).
+  // The weekday itself no longer needs to land within the current calendar
+  // month: none of this file's tests key their assertions off of that
+  // except "an unpaid month keeps the series alive but stops confirming
+  // dates" below, which inserts its own deterministic in-month occurrence
+  // directly (see insertOccurrenceLaterToday() in test/helpers.ts) instead
+  // of relying on this rule's weekday to land there. "Tomorrow" keeps the
+  // rest of this file's tests (which only need *a* near-future occurrence,
+  // not one within this month specifically) simple and always future.
+  const weekday = (new Date().getUTCDay() + 1) % 7;
   const { data: rule } = await owner.client
     .from("schedule_rules")
     .insert({
       organization_id: org.id,
       service_id: service!.id,
       resource_id: resource!.id,
-      weekday: weekdayWithinCurrentMonth(),
+      weekday,
       local_start_time: "09:00",
       duration_minutes: 60,
       capacity,
@@ -75,7 +64,7 @@ async function setupPilates(prefix: string, capacity: number) {
     .select()
     .single();
 
-  return { owner, org, service: service!, rule: rule! };
+  return { owner, org, service: service!, resource: resource!, rule: rule! };
 }
 
 /**
@@ -248,12 +237,24 @@ describe("Phase 11: standing reservations", () => {
   });
 
   it("an unpaid month keeps the series alive but stops confirming dates", async () => {
-    const { owner, org, service, rule } = await setupPilates("p11-unpaid", 10);
+    const { owner, org, service, resource, rule } = await setupPilates("p11-unpaid", 10);
     createdUserIds.push(owner.id);
     const { customer, customerRow } = await enrollCustomer(owner, org, service.id, "p11-unpaid-customer", {
       gated: true,
     });
     createdUserIds.push(customer.id);
+
+    // Guarantee at least one occurrence lands within the current calendar
+    // month, unpaid, regardless of what day/hour this runs -- including the
+    // actual last day of the month, where the rule's own weekly weekday
+    // might not have a matching date left this month. See
+    // insertOccurrenceLaterToday() in test/helpers.ts for why this must be
+    // "later today" rather than any other offset.
+    await insertOccurrenceLaterToday(
+      rule,
+      { organizationId: org.id, serviceId: service.id, resourceId: resource.id },
+      { capacity: 10 },
+    );
 
     const { data: rb } = await owner.client.rpc("admin_create_recurring_booking", {
       p_schedule_rule_id: rule.id,
