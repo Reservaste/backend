@@ -518,11 +518,16 @@ describe("ADR-0033 -- roles configurables por organización", () => {
     });
     expect(createError?.message).toContain("NOT_AUTHORIZED");
 
+    // ADR-0043 (corrección post-review): enroll_customer_by_email() ya no
+    // tiene EXECUTE para authenticated en absoluto (le daba acceso de
+    // Customer a quien ocupara un email sin probar identidad) -- el
+    // permission denied llega antes de que corra el chequeo de
+    // MANAGE_CUSTOMERS, para cualquier caller.
     const { error: enrollError } = await staff.client.rpc("enroll_customer_by_email", {
       p_organization_id: ctx.org.id,
       p_email: "alguien@example.com",
     });
-    expect(enrollError?.message).toContain("NOT_AUTHORIZED");
+    expect(enrollError?.code).toBe("42501");
 
     // PostgREST directo contra la tabla.
     const other = await newUser("p32-nocust-target");
@@ -944,17 +949,20 @@ describe("ADR-0033 -- roles configurables por organización", () => {
     expect(fallback.role_id).toBe(defaultRole!.id);
   });
 
-  it("invite_member_by_email() sigue aceptando 3 argumentos y acepta el rol nuevo", async () => {
+  it("invite_member_by_email() queda revocada para authenticated, con 3 o 4 argumentos (ADR-0043, corrección post-review)", async () => {
     const ctx = await setupOrg("p32-invite");
 
     const legacy = await newUser("p32-invite-legacy");
     const { data: legacyEmail } = await admin.auth.admin.getUserById(legacy.id);
+    // Llamada legacy de 3 argumentos (p_role_id resuelve al DEFAULT null):
+    // sigue resolviendo la firma via PostgREST, pero el EXECUTE está
+    // revocado -- 42501 antes de correr nada del cuerpo de la función.
     const { error: legacyError } = await ctx.owner.client.rpc("invite_member_by_email", {
       p_organization_id: ctx.org.id,
       p_email: legacyEmail.user!.email!,
       p_role: "STAFF",
     });
-    expect(legacyError).toBeNull();
+    expect(legacyError?.code).toBe("42501");
 
     const { data: role } = await ctx.owner.client.rpc("create_organization_role", {
       p_organization_id: ctx.org.id,
@@ -971,13 +979,25 @@ describe("ADR-0033 -- roles configurables por organización", () => {
       p_role: "STAFF",
       p_role_id: (role as { id: string }).id,
     });
-    expect(inviteError).toBeNull();
+    expect(inviteError?.code).toBe("42501");
+  });
+
+  it("asignar un rol configurable a un miembro nuevo se refleja en my_organization_permissions() (reemplazo del invite_member_by_email() revocado)", async () => {
+    // Cobertura equivalente a la que daba el test de arriba antes de
+    // ADR-0043: en producción, un STAFF con rol nuevo llega vía
+    // claim_team_invitation() (ADR-0034) con p_role_id, que internamente
+    // hace el mismo insert + set_member_role que addStaff() reproduce acá
+    // con la escritura directa que ya usa este archivo.
+    const ctx = await setupOrg("p32-invite-role");
+    const { staff: invited } = await addStaff(ctx.owner, ctx.org, "p32-invite-role-staff", {
+      can_view_payments: false,
+      can_manage_payments: false,
+    });
 
     const { data: perms } = await invited.client.rpc("my_organization_permissions", {
       p_organization_id: ctx.org.id,
     });
     expect(perms![0]).toMatchObject({
-      role_name: "Profesor invitado",
       can_view_payments: false,
       can_manage_payments: false,
       can_manage_bookings: true,

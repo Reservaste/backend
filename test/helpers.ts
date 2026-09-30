@@ -50,7 +50,18 @@ export async function createSignedInUser(
   }
 
   const client = createClient(SUPABASE_URL, ANON_KEY);
-  const { error: signInError } = await client.auth.signInWithPassword({ email, password: PASSWORD });
+  const { error: signInError } = await client.auth.signInWithPassword({
+    email,
+    password: PASSWORD,
+    // ADR-0043 (correccion post-review, punto 5): Turnstile esta
+    // habilitado (supabase/config.toml, [auth.captcha]) con la clave de
+    // prueba "always passes" que Cloudflare publica para automatizar
+    // tests sin navegador -- acepta cualquier token no vacio. Sin esto,
+    // GoTrue devuelve `captcha_failed` (confirmado en vivo) porque el
+    // grant `password` tambien pasa por la verificacion de captcha, no
+    // solo el signup.
+    options: { captchaToken: "test-suite-turnstile-token" },
+  });
   if (signInError) {
     throw new Error(`failed to sign in test user ${email}: ${signInError.message}`);
   }
