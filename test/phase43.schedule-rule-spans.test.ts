@@ -280,4 +280,96 @@ describe("Phase 43: schedule rule generator by span (ADR-0045)", () => {
       .order("start_at", { ascending: true });
     expect(occurrences!.length).toBeGreaterThan(0);
   });
+
+  it("(h) ADR-0050: schedule_rule_groups() reports all 4 distinct start times of a one-weekday span, not one collapsed value", async () => {
+    await setup();
+    const resource = await createResource("Sala H (span, un dia, 4 horas)", false);
+    const weekday = weekdayInTwoDays();
+
+    // Same span as test (a): one weekday, starts at 09:00/09:30/10:00/10:30
+    // under a single group_id -- the exact shape that min(local_start_time)
+    // used to collapse to just "09:00" (see phase46 migration).
+    const { data: groupId, error } = await owner.client.rpc("create_schedule_rule_span", {
+      p_service_id: service.id,
+      p_resource_id: resource.id,
+      p_weekdays: [weekday],
+      p_range_start: "09:00",
+      p_range_end: "11:00",
+      p_step_minutes: 30,
+      p_duration_minutes: 30,
+      p_capacity: 5,
+    });
+    expect(error).toBeNull();
+
+    const { data: groups, error: groupsError } = await owner.client.rpc("schedule_rule_groups", {
+      p_service_id: service.id,
+    });
+    expect(groupsError).toBeNull();
+    expect(groups).toHaveLength(1);
+
+    const group = groups![0];
+    expect(group.group_id).toBe(groupId);
+    expect(group.resource_id).toBe(resource.id);
+    expect(group.duration_minutes).toBe(30);
+    expect(group.capacity).toBe(5);
+
+    // The four rules, not one collapsed row: every item carries its own
+    // real (ruleId, weekday, localStartTime) triple.
+    expect(group.items).toHaveLength(4);
+    expect(group.items.every((item: { weekday: number }) => item.weekday === weekday)).toBe(true);
+
+    const startTimes = group.items
+      .map((item: { localStartTime: string }) => item.localStartTime)
+      .sort();
+    expect(startTimes).toEqual(["09:00:00", "09:30:00", "10:00:00", "10:30:00"]);
+
+    // Every ruleId is distinct and matches an actual schedule_rules row for
+    // its own local_start_time -- no positional zip against a second array,
+    // no shared collapsed value.
+    const ruleIds: string[] = group.items.map((item: { ruleId: string }) => item.ruleId);
+    expect(new Set(ruleIds).size).toBe(4);
+
+    const rules = await rulesForGroup(groupId as string);
+    for (const item of group.items as Array<{ ruleId: string; localStartTime: string }>) {
+      const matching = rules.find((r) => r.id === item.ruleId);
+      expect(matching).toBeDefined();
+      expect(matching!.local_start_time).toBe(item.localStartTime);
+    }
+  });
+
+  it("(i) ADR-0050: the ADR-0022 case (one shared start time, distinct weekdays) is unaffected", async () => {
+    await setup();
+    const resource = await createResource("Sala I (grupo clasico Mon/Wed/Fri)", false);
+
+    const { data: rules, error } = await owner.client.rpc("create_schedule_rule_group", {
+      p_service_id: service.id,
+      p_resource_id: resource.id,
+      p_weekdays: [1, 3, 5],
+      p_local_start_time: "09:00",
+      p_duration_minutes: 60,
+      p_capacity: 15,
+    });
+    expect(error).toBeNull();
+    const groupId = rules![0]!.group_id;
+
+    const { data: groups, error: groupsError } = await owner.client.rpc("schedule_rule_groups", {
+      p_service_id: service.id,
+    });
+    expect(groupsError).toBeNull();
+    expect(groups).toHaveLength(1);
+
+    const group = groups![0];
+    expect(group.group_id).toBe(groupId);
+    expect(group.duration_minutes).toBe(60);
+    expect(group.capacity).toBe(15);
+    expect(group.items).toHaveLength(3);
+    expect(
+      group.items.every(
+        (item: { localStartTime: string }) => item.localStartTime === "09:00:00",
+      ),
+    ).toBe(true);
+    expect(
+      group.items.map((item: { weekday: number }) => item.weekday).sort(),
+    ).toEqual([1, 3, 5]);
+  });
 });
