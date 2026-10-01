@@ -372,4 +372,67 @@ describe("Phase 43: schedule rule generator by span (ADR-0045)", () => {
       group.items.map((item: { weekday: number }) => item.weekday).sort(),
     ).toEqual([1, 3, 5]);
   });
+
+  // Phase 48 security fix: a STAFF member of Organization A, with
+  // MANAGE_BOOKINGS (the default for a STAFF member with no role_id -- see
+  // phase32.configurable-roles.test.ts), creates a span for a Service that
+  // genuinely belongs to A, but passes the resource_id of a real Resource
+  // belonging to Organization B. Before this fix, create_schedule_rule_span()
+  // only checked that the Resource existed (RESOURCE_NOT_FOUND), never that
+  // it belonged to the same organization as the Service -- it must now be
+  // rejected with the same RESOURCE_NOT_FOUND code (never disclosing that
+  // the resource exists under another tenant), with no ScheduleRule row
+  // created on either side.
+  it("(j) rejects create_schedule_rule_span when resource_id belongs to another organization", async () => {
+    await setup();
+    const weekday = weekdayInTwoDays();
+
+    const ownerB = await createSignedInUser("p43-xorg-owner-b");
+    createdUserIds.push(ownerB.id);
+    const orgB = await createOrganization(ownerB, "p43-xorg-org-b");
+    const { data: resourceB, error: resourceBError } = await ownerB.client
+      .from("resources")
+      .insert({ organization_id: orgB.id, name: "Barbero (otra org)", created_by: ownerB.id })
+      .select()
+      .single();
+    expect(resourceBError).toBeNull();
+
+    const staffA = await createSignedInUser("p43-xorg-staff-a");
+    createdUserIds.push(staffA.id);
+    const { error: memberError } = await owner.client
+      .from("organization_members")
+      .insert({
+        organization_id: org.id,
+        profile_id: staffA.id,
+        role: "STAFF",
+        created_by: owner.id,
+      });
+    expect(memberError).toBeNull();
+
+    const { data, error } = await staffA.client.rpc("create_schedule_rule_span", {
+      p_service_id: service.id,
+      p_resource_id: (resourceB as { id: string }).id,
+      p_weekdays: [weekday],
+      p_range_start: "09:00",
+      p_range_end: "11:00",
+      p_step_minutes: 30,
+      p_duration_minutes: 30,
+      p_capacity: 5,
+    });
+    expect(data).toBeNull();
+    expect(error).not.toBeNull();
+    expect(error!.message).toContain("RESOURCE_NOT_FOUND");
+
+    const { data: rulesOnServiceA } = await owner.client
+      .from("schedule_rules")
+      .select("id")
+      .eq("service_id", service.id);
+    expect(rulesOnServiceA).toEqual([]);
+
+    const { data: rulesOnResourceB } = await ownerB.client
+      .from("schedule_rules")
+      .select("id")
+      .eq("resource_id", (resourceB as { id: string }).id);
+    expect(rulesOnResourceB).toEqual([]);
+  });
 });

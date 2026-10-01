@@ -181,6 +181,57 @@ describe("Schedule rule groups, attendance and payments overview", () => {
     expect(res.error?.message).toContain("NOT_AUTHORIZED");
   });
 
+  // Phase 48 security fix: a STAFF member of Organization A, with
+  // MANAGE_BOOKINGS (the default for a STAFF member with no role_id -- see
+  // phase32.configurable-roles.test.ts), creates a schedule for a Service
+  // that genuinely belongs to A, but passes the resource_id of a real
+  // Resource belonging to Organization B. Before this fix,
+  // create_schedule_rule_group() never resolved/validated the Resource
+  // itself -- this must now be rejected with RESOURCE_NOT_FOUND (same code
+  // as "does not exist", never disclosing that the resource exists under
+  // another tenant), and no ScheduleRule row may be created on either side.
+  it("rejects create_schedule_rule_group when resource_id belongs to another organization", async () => {
+    const { owner: ownerA, org: orgA, service: serviceA } = await setupOrg("p16-xorg-resource-a");
+    createdUserIds.push(ownerA.id);
+    const { owner: ownerB, resource: resourceB } = await setupOrg("p16-xorg-resource-b");
+    createdUserIds.push(ownerB.id);
+
+    const staffA = await createSignedInUser("p16-xorg-resource-staff");
+    createdUserIds.push(staffA.id);
+    const { error: memberError } = await ownerA.client
+      .from("organization_members")
+      .insert({
+        organization_id: orgA.id,
+        profile_id: staffA.id,
+        role: "STAFF",
+        created_by: ownerA.id,
+      });
+    expect(memberError).toBeNull();
+
+    const res = await staffA.client.rpc("create_schedule_rule_group", {
+      p_service_id: serviceA.id,
+      p_resource_id: resourceB.id,
+      p_weekdays: [1],
+      p_local_start_time: "09:00",
+      p_duration_minutes: 60,
+      p_capacity: 10,
+    });
+    expect(res.data).toBeNull();
+    expect(res.error?.message).toContain("RESOURCE_NOT_FOUND");
+
+    const { data: rulesA } = await ownerA.client
+      .from("schedule_rules")
+      .select("id")
+      .eq("service_id", serviceA.id);
+    expect(rulesA).toEqual([]);
+
+    const { data: rulesOnResourceB } = await ownerB.client
+      .from("schedule_rules")
+      .select("id")
+      .eq("resource_id", resourceB.id);
+    expect(rulesOnResourceB).toEqual([]);
+  });
+
   // ---------------- Attendance ----------------
 
   it("marks attendance without touching the booking's own status", async () => {
