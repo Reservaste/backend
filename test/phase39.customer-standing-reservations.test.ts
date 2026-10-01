@@ -14,6 +14,7 @@ import {
   createOrganization,
   createServicePlan,
   createSignedInUser,
+  insertOccurrenceLaterToday,
   isoDate,
   payFor,
   type SignedInUser,
@@ -195,6 +196,19 @@ describe("Phase 39: customer_standing_reservations() / customer_service_plan_quo
       expect(error).toBeNull();
     }
 
+    // Una ocurrencia real por regla, insertada directamente en vez de
+    // confiar en que el weekday elegido por createRule() caiga dentro del
+    // mes calendario vigente (borde de fin de mes, ver curation-inbox.md
+    // 2026-09-29/30) -- admin_create_recurring_booking() sólo genera un
+    // Booking si ya existe una SlotOccurrence real que matchee la regla.
+    const ctxA = { organizationId: f.org.id, serviceId: serviceA.id, resourceId: f.resource.id };
+    const ctxB = { organizationId: f.org.id, serviceId: serviceB.id, resourceId: f.resource.id };
+    const ctxC = { organizationId: f.org.id, serviceId: serviceC.id, resourceId: f.resource.id };
+    await insertOccurrenceLaterToday(ruleA1, ctxA);
+    await insertOccurrenceLaterToday(ruleA2, ctxA);
+    await insertOccurrenceLaterToday(ruleB1, ctxB);
+    await insertOccurrenceLaterToday(ruleC1, ctxC);
+
     const rbA1 = await assignStanding(f, ruleA1.id, customerRow.id);
     const rbA2 = await assignStanding(f, ruleA2.id, customerRow.id);
     const rbB1 = await assignStanding(f, ruleB1.id, customerRow.id);
@@ -275,6 +289,13 @@ describe("Phase 39: customer_standing_reservations() / customer_service_plan_quo
       price: 2000,
     });
     const rule = await createRule(f, service.id, 1);
+    // Mismo motivo que en el test anterior: una ocurrencia real, no
+    // depender de que el weekday caiga dentro del mes vigente.
+    await insertOccurrenceLaterToday(rule, {
+      organizationId: f.org.id,
+      serviceId: service.id,
+      resourceId: f.resource.id,
+    });
 
     const { customer, customerRow } = await enroll(f, "p39-noplan-cust");
     createdUserIds.push(customer.id);

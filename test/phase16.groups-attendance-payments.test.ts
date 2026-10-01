@@ -80,11 +80,21 @@ describe("Schedule rule groups, attendance and payments overview", () => {
     expect(new Set(data.map((r: { group_id: string }) => r.group_id)).size).toBe(1);
     expect(data.map((r: { weekday: number }) => r.weekday).sort()).toEqual([1, 3, 5]);
 
+    // ADR-0050: schedule_rule_groups() returns one `items` entry per
+    // ScheduleRule row (ruleId/weekday/localStartTime), not the old
+    // collapsed weekdays[]/rule_ids[] pair -- see phase46 for why.
     const groups = await owner.client.rpc("schedule_rule_groups", { p_service_id: service.id });
     expect(groups.data).toHaveLength(1);
-    expect(groups.data[0].weekdays).toEqual([1, 3, 5]);
     expect(groups.data[0].capacity).toBe(15);
-    expect(groups.data[0].rule_ids).toHaveLength(3);
+    expect(groups.data[0].items).toHaveLength(3);
+    expect(
+      groups.data[0].items.map((item: { weekday: number }) => item.weekday).sort(),
+    ).toEqual([1, 3, 5]);
+    expect(
+      groups.data[0].items.every(
+        (item: { localStartTime: string }) => item.localStartTime === "09:00:00",
+      ),
+    ).toBe(true);
   });
 
   it("picking the same weekday twice does not create two identical rules", async () => {

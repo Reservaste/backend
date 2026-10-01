@@ -132,6 +132,7 @@ export interface CustomerRow {
   phone: string | null;
   claimed_at: string | null;
   merged_into_customer_id: string | null;
+  source: string;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -150,6 +151,7 @@ export function mapCustomer(row: CustomerRow): Customer {
     phone: row.phone,
     claimedAt: row.claimed_at,
     mergedIntoCustomerId: row.merged_into_customer_id,
+    source: row.source as Customer["source"],
     isActive: row.is_active,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
