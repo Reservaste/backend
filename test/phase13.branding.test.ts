@@ -107,6 +107,57 @@ describe("Phase 13: organization branding", () => {
     expect(own.error).toBeNull();
   });
 
+  // ============================================================
+  // Phase 52 (ADR-0049) -- Organization.industry: free text, OWNER-only,
+  // same policy as the rest of this file's settings (no new RPC, no new
+  // CHECK).
+  // ============================================================
+
+  it("an owner sets industry to arbitrary free text and it persists, including a value with no predefined list", async () => {
+    const owner = await createSignedInUser("p52-industry");
+    createdUserIds.push(owner.id);
+    const org = await createOrganization(owner, "p52-industry");
+
+    const { error } = await owner.client
+      .from("organizations")
+      .update({ industry: "estudio de tatuajes" })
+      .eq("id", org.id);
+    expect(error).toBeNull();
+
+    const { data } = await owner.client.from("organizations").select("industry").eq("id", org.id).single();
+    // No CHECK list to satisfy on purpose (ADR-0049): an unforeseen
+    // vertical is just a string, never a migration.
+    expect(data?.industry).toBe("estudio de tatuajes");
+
+    const update = await owner.client
+      .from("organizations")
+      .update({ industry: "consultorio" })
+      .eq("id", org.id);
+    expect(update.error).toBeNull();
+
+    const { data: updated } = await owner.client
+      .from("organizations")
+      .select("industry")
+      .eq("id", org.id)
+      .single();
+    expect(updated?.industry).toBe("consultorio");
+  });
+
+  it("a STAFF member cannot set industry -- same organizations_update_owner policy as the rest of this file", async () => {
+    const owner = await createSignedInUser("p52-industry-staff");
+    createdUserIds.push(owner.id);
+    const org = await createOrganization(owner, "p52-industry-staff");
+    const staff = await addStaff(owner, org.id, "p52-industry-staff-member");
+    createdUserIds.push(staff.id);
+
+    // Same RLS as brand_color above: the row-level policy makes this
+    // match zero rows rather than raising.
+    await staff.client.from("organizations").update({ industry: "gimnasio" }).eq("id", org.id);
+
+    const { data } = await owner.client.from("organizations").select("industry").eq("id", org.id).single();
+    expect(data?.industry).toBeNull();
+  });
+
   it("a STAFF member cannot change the branding", async () => {
     const owner = await createSignedInUser("p13-staff");
     createdUserIds.push(owner.id);
